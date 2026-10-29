@@ -1,0 +1,50 @@
+# Git Ignore for Circle-to-Select Video Object Removal
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Node & Frontend
+node_modules/
+dist/
+.vite/
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Checkpoints and Heavy Weights (DO NOT COMMIT)
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+
+# Ephemeral Job Workspaces & Uploads
+workspace/
+temp/
+*.mp4
+*.mov
+*.webm
+*.avi
+
+# Environment secrets
+.env
+.env.local
+
+# System & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
