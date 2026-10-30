@@ -406,8 +406,16 @@ check_and_prompt_dependencies
 
 # Step 2: Ensure virtual environment and backend dependencies
 if [[ ! -d "${VENV_DIR}" ]]; then
-  log_info "Creating Python virtual environment in .venv..."
-  python3 -m venv "${VENV_DIR}"
+  # Prefer Python 3.12 / 3.11 / 3.10 if available (for optimal PyTorch & SAM 2 wheel support)
+  chosen_python="python3"
+  for py_cand in python3.12 python3.11 python3.10 python3; do
+    if command -v "${py_cand}" >/dev/null 2>&1 && "${py_cand}" -c "import venv" >/dev/null 2>&1; then
+      chosen_python="${py_cand}"
+      break
+    fi
+  done
+  log_info "Creating Python virtual environment in .venv using ${chosen_python}..."
+  "${chosen_python}" -m venv "${VENV_DIR}"
 fi
 
 PYTHON="${VENV_DIR}/bin/python"
@@ -415,6 +423,33 @@ PIP="${VENV_DIR}/bin/pip"
 
 log_info "Verifying backend Python dependencies..."
 "${PIP}" install -r "${PROJECT_DIR}/backend/requirements.txt"
+
+# Step 2.1: Verify PyTorch and SAM 2 installation for GPU/accelerated tracking
+if ! "${PYTHON}" -c "import torch; import sam2" >/dev/null 2>&1; then
+  log_info "Checking PyTorch and SAM 2 (Segment Anything 2) in virtual environment..."
+  if ! "${PYTHON}" -c "import torch" >/dev/null 2>&1; then
+    log_info "Installing PyTorch into .venv..."
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      log_info "NVIDIA GPU detected. Installing PyTorch with CUDA acceleration..."
+      "${PIP}" install torch torchvision --index-url https://download.pytorch.org/whl/cu124 || \
+        "${PIP}" install torch torchvision
+    else
+      "${PIP}" install torch torchvision
+    fi
+  fi
+
+  if ! "${PYTHON}" -c "import sam2" >/dev/null 2>&1; then
+    log_info "Installing SAM 2 package (facebookresearch/sam2) into .venv..."
+    "${PIP}" install git+https://github.com/facebookresearch/sam2.git || \
+      log_warn "Failed to install SAM 2 from git. The app will use the heuristic fallback if SAM 2 is unavailable."
+  fi
+fi
+
+if "${PYTHON}" -c "import torch; import sam2" >/dev/null 2>&1; then
+  log_success "PyTorch and SAM 2 successfully verified in .venv."
+else
+  log_warn "SAM 2 or PyTorch is not fully installed. stirs will continue using the fallback generator."
+fi
 
 # Step 3: Check and auto-download model weights if not present
 setup_model_weights
