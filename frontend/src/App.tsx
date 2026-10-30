@@ -5,12 +5,32 @@ import {
   AlertCircle,
   Loader2,
   CircleDot,
+  Plus,
+  Minus,
+  Undo2,
+  Redo2,
+  Bookmark,
+  Eye,
+  EyeOff,
+  HelpCircle,
+  Video,
+  Lasso,
+  Square,
+  Sparkles,
+  Film,
+  Trash2,
 } from 'lucide-react';
-import { VideoLassoCanvas } from './components/VideoLassoCanvas';
+import { VideoLassoCanvas, SelectionTool } from './components/VideoLassoCanvas';
 import { MaskOverlay } from './components/MaskOverlay';
 import { TimelineControls } from './components/TimelineControls';
 import { LiveProgressTracker } from './components/LiveProgressTracker';
 import { MaskPreviewPlayer } from './components/MaskPreviewPlayer';
+import { ShortcutsModal } from './components/ShortcutsModal';
+import {
+  SAMPLE_VIDEOS,
+  createSampleVideoFile,
+  SampleVideoInfo,
+} from './utils/sampleVideos';
 import {
   StrokeInput,
   StrokeMode,
@@ -31,11 +51,13 @@ import {
 
 export const App: React.FC = () => {
   // Video & File state
-  const [_videoFile, setVideoFile] = useState<File | null>(null);
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState<boolean>(false);
+  const [isLoadingSample, setIsLoadingSample] = useState<string | null>(null);
 
   // Playback & Frame state
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -47,12 +69,18 @@ export const App: React.FC = () => {
   const [currentFrame, setCurrentFrame] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
+  // Tool & Mode state
+  const [activeTool, setActiveTool] = useState<SelectionTool>('lasso');
+  const [strokeMode, setStrokeMode] = useState<StrokeMode>('include');
+  const [dilationPx, setDilationPx] = useState<number>(7);
+  const [isPeekHidden, setIsPeekHidden] = useState<boolean>(false);
+  const [isShortcutsOpen, setIsShortcutsOpen] = useState<boolean>(false);
+  const [activeNavTab, setActiveNavTab] = useState<'tools' | 'keyframes' | 'samples' | 'settings'>('tools');
+
   // Annotation & Mask state (supports multi-keyframe refinement)
   const [keyframeStrokes, setKeyframeStrokes] = useState<Record<number, StrokeInput[]>>({});
   const [strokeHistory, setStrokeHistory] = useState<StrokeHistoryMap>({});
   const [currentKeyframePreviews, setCurrentKeyframePreviews] = useState<Record<number, string>>({});
-  const [strokeMode, setStrokeMode] = useState<StrokeMode>('include');
-  const [dilationPx, setDilationPx] = useState<number>(7);
   const [maskBase64, setMaskBase64] = useState<string | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState<boolean>(false);
 
@@ -84,15 +112,9 @@ export const App: React.FC = () => {
   // Clean up timers and SSE connections on unmount
   useEffect(() => {
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (eventSourceRef.current) eventSourceRef.current.close();
     };
   }, []);
 
@@ -111,9 +133,7 @@ export const App: React.FC = () => {
       }
     }
     return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
+      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [isProcessing]);
 
@@ -134,11 +154,8 @@ export const App: React.FC = () => {
     return () => resizeObserver.disconnect();
   }, [videoSrc]);
 
-  // Handle Video file upload
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  // Core file upload handler
+  const processUploadedFile = async (file: File) => {
     setVideoFile(file);
     const localUrl = URL.createObjectURL(file);
     setVideoSrc(localUrl);
@@ -180,6 +197,44 @@ export const App: React.FC = () => {
       }
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) processUploadedFile(file);
+  };
+
+  // Drag and drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFile(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.type.startsWith('video/') || file.name.endsWith('.mp4') || file.name.endsWith('.webm') || file.name.endsWith('.mov'))) {
+      processUploadedFile(file);
+    }
+  };
+
+  // Load sample procedural video
+  const handleLoadSample = async (sample: SampleVideoInfo) => {
+    try {
+      setIsLoadingSample(sample.id);
+      const file = await createSampleVideoFile(sample.type);
+      await processUploadedFile(file);
+    } catch (err) {
+      console.error('Failed to generate sample video:', err);
+    } finally {
+      setIsLoadingSample(null);
     }
   };
 
@@ -284,7 +339,6 @@ export const App: React.FC = () => {
   };
 
   const handleStrokeCompleted = (updatedStrokes: StrokeInput[]) => {
-    // Record stroke action in history: push previous strokes to past, invalidate redo
     const prevStrokes = keyframeStrokes[currentFrame] || [];
     setStrokeHistory((prevHistory) =>
       recordStrokeAction(prevHistory, currentFrame, prevStrokes)
@@ -324,10 +378,26 @@ export const App: React.FC = () => {
     requestMaskPreview([]);
   }, [keyframeStrokes, currentFrame, requestMaskPreview]);
 
-  // Keyboard shortcuts for Undo and Redo
+  // Delete a specific keyframe's strokes
+  const handleDeleteKeyframe = (fIdx: number) => {
+    setKeyframeStrokes((prev) => {
+      const next = { ...prev };
+      delete next[fIdx];
+      return next;
+    });
+    setCurrentKeyframePreviews((prev) => {
+      const next = { ...prev };
+      delete next[fIdx];
+      return next;
+    });
+    if (fIdx === currentFrame) {
+      setMaskBase64(null);
+    }
+  };
+
+  // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Do not capture shortcuts while focus is in text-entry controls
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -338,34 +408,111 @@ export const App: React.FC = () => {
         return;
       }
 
-      // Check if editor is active (video loaded and not currently processing or showing output)
+      // '?' opens shortcuts modal
+      if (e.key === '?') {
+        e.preventDefault();
+        setIsShortcutsOpen((prev) => !prev);
+        return;
+      }
+
+      // 'Escape' closes modal or cancels preview
+      if (e.key === 'Escape') {
+        if (isShortcutsOpen) {
+          setIsShortcutsOpen(false);
+          return;
+        }
+      }
+
+      // Space toggles Play / Pause
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleTogglePlay();
+        return;
+      }
+
+      // Check if in editor view
       if (!videoSrc || outputUrl || isProcessing) {
         return;
       }
 
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-      const isUndo =
-        (isMac ? e.metaKey : e.ctrlKey) &&
-        !e.shiftKey &&
-        (e.key === 'z' || e.key === 'Z');
-      const isRedo =
-        ((isMac ? e.metaKey : e.ctrlKey) &&
-          e.shiftKey &&
-          (e.key === 'z' || e.key === 'Z')) ||
-        (!isMac && e.ctrlKey && (e.key === 'y' || e.key === 'Y'));
+      const isCmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
 
-      if (isUndo) {
+      // Undo / Redo
+      if (isCmdOrCtrl && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
         handleUndo();
-      } else if (isRedo) {
+        return;
+      }
+      if (
+        (isCmdOrCtrl && e.shiftKey && (e.key === 'z' || e.key === 'Z')) ||
+        (!isMac && e.ctrlKey && (e.key === 'y' || e.key === 'Y'))
+      ) {
         e.preventDefault();
         handleRedo();
+        return;
+      }
+
+      // Frame Stepping (Arrow keys)
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handleStepFrame(e.shiftKey ? -10 : -1);
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleStepFrame(e.shiftKey ? 10 : 1);
+        return;
+      }
+
+      // Tool selection hotkeys: 1 (Lasso), 2 (Box), 3 (Point)
+      if (e.key === '1') {
+        setActiveTool('lasso');
+        return;
+      }
+      if (e.key === '2') {
+        setActiveTool('box');
+        return;
+      }
+      if (e.key === '3') {
+        setActiveTool('point');
+        return;
+      }
+
+      // Mode toggles: I (include), E (exclude)
+      if (e.key === 'i' || e.key === 'I') {
+        setStrokeMode('include');
+        return;
+      }
+      if (e.key === 'e' || e.key === 'E') {
+        setStrokeMode('exclude');
+        return;
+      }
+
+      // Peek toggle: H
+      if (e.key === 'h' || e.key === 'H') {
+        setIsPeekHidden((prev) => !prev);
+        return;
+      }
+
+      // Keyframe navigation: [ and ]
+      const allKf = Object.keys(keyframeStrokes).map((k) => parseInt(k, 10)).sort((a, b) => a - b);
+      if (e.key === '[') {
+        const prevs = allKf.filter((k) => k < currentFrame);
+        if (prevs.length > 0) handleSeekFrame(prevs[prevs.length - 1]);
+        return;
+      }
+      if (e.key === ']') {
+        const nexts = allKf.filter((k) => k > currentFrame);
+        if (nexts.length > 0) handleSeekFrame(nexts[0]);
+        return;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [videoSrc, outputUrl, isProcessing, handleUndo, handleRedo]);
+  }, [videoSrc, outputUrl, isProcessing, isShortcutsOpen, currentFrame, keyframeStrokes, handleUndo, handleRedo]);
+
   const handleCancelJob = async () => {
     if (!metadata || !currentRunId) return;
     setIsCancelling(true);
@@ -379,7 +526,6 @@ export const App: React.FC = () => {
   };
 
   const handleStartMaskJob = async () => {
-    // Gather all keyframes that have strokes
     const keyframesList = Object.entries(keyframeStrokes)
       .filter(([_, s]) => s && s.length > 0)
       .map(([fIdxStr, s]) => ({
@@ -420,15 +566,9 @@ export const App: React.FC = () => {
       const runId = resData.run_id;
       setCurrentRunId(runId);
 
-      // Clean up any existing listeners
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
+      if (eventSourceRef.current) eventSourceRef.current.close();
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
 
-      // Connect to SSE stream scoped to run_id
       const eventSource = new EventSource(`/api/v1/jobs/${metadata.job_id}/events?run_id=${runId}`);
       eventSourceRef.current = eventSource;
 
@@ -436,10 +576,7 @@ export const App: React.FC = () => {
         try {
           const data: JobProgressEvent = JSON.parse(rawData);
           if (data && data.stage) {
-            // Ignore events belonging to other runs
-            if (data.run_id && data.run_id !== runId) {
-              return;
-            }
+            if (data.run_id && data.run_id !== runId) return;
             setJobProgress(data);
             if (data.stage === 'completed') {
               if (eventSourceRef.current) {
@@ -479,21 +616,18 @@ export const App: React.FC = () => {
       eventSource.addEventListener('progress', (e: MessageEvent) => {
         handleEventData(e.data);
       });
-
       eventSource.onmessage = (event) => {
         handleEventData(event.data);
       };
 
-      // Poll fallback with run_id parameter to ensure real-time UI synchronization
+      // Poll fallback
       const pollInterval = window.setInterval(async () => {
         try {
           const pollRes = await fetch(`/api/v1/jobs/${metadata.job_id}/status?run_id=${runId}`);
           if (pollRes.ok) {
             const statusData: JobProgressEvent = await pollRes.json();
             if (statusData && statusData.stage) {
-              if (statusData.run_id && statusData.run_id !== runId) {
-                return;
-              }
+              if (statusData.run_id && statusData.run_id !== runId) return;
               setJobProgress(statusData);
               if (statusData.stage === 'completed') {
                 if (pollIntervalRef.current) {
@@ -571,7 +705,6 @@ export const App: React.FC = () => {
   };
 
   const handleAddAnotherSubject = (frameToSeek: number) => {
-    // Keep existing masks on disk, switch to accumulation mode
     setOutputUrl(null);
     setAccumulateMode(true);
     setKeyframeStrokes({});
@@ -581,308 +714,666 @@ export const App: React.FC = () => {
     handleSeekFrame(frameToSeek);
   };
 
+  const hasKeyframes = Object.keys(keyframeStrokes).length > 0;
+
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans">
-      {/* Monochromatic Minimal Header */}
-      <header className="border-b border-neutral-800 bg-neutral-950 sticky top-0 z-30 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-6 h-6 rounded bg-neutral-100 flex items-center justify-center text-neutral-950 font-mono font-bold text-xs">
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className="w-screen h-screen overflow-hidden flex flex-col bg-neutral-950 text-neutral-100 font-sans select-none"
+    >
+      {/* 1. Sleek Top Navigation Bar (VEED.IO Style) */}
+      <header className="h-12 w-full flex-shrink-0 border-b border-neutral-800/80 bg-neutral-950/95 backdrop-blur px-4 flex items-center justify-between z-40">
+        {/* Left: App Logo, Title, Undo / Redo */}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-lime-500 flex items-center justify-center text-neutral-950 font-bold text-sm shadow-sm flex-shrink-0">
             S
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-sm font-semibold text-neutral-100 tracking-tight">
+
+          <div className="flex items-baseline gap-2 min-w-0 truncate">
+            <span className="text-sm font-semibold text-neutral-100 tracking-tight flex-shrink-0">
               stirs
             </span>
-            <span className="text-[11px] font-mono text-neutral-500">
-              SAM 2 Video Mask Generator
+            <span className="text-xs text-neutral-400 font-mono truncate hidden sm:inline">
+              {videoFile ? videoFile.name : 'SAM 2 Video Mask Generator'}
             </span>
           </div>
+
+          {/* Undo / Redo in top bar */}
+          {videoSrc && !outputUrl && (
+            <div className="flex items-center gap-0.5 ml-2 pl-3 border-l border-neutral-800 flex-shrink-0">
+              <button
+                type="button"
+                onClick={handleUndo}
+                disabled={isProcessing || (!canUndo(strokeHistory, currentFrame) && currentStrokes.length === 0)}
+                title="Undo (Ctrl+Z)"
+                className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition disabled:opacity-20"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleRedo}
+                disabled={isProcessing || !canRedo(strokeHistory, currentFrame)}
+                title="Redo (Ctrl+Shift+Z)"
+                className="p-1.5 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition disabled:opacity-20"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
 
-        {metadata && (
-          <div className="flex items-center gap-4 text-[11px] font-mono text-neutral-400">
-            <div>
-              {metadata.width}x{metadata.height}
-            </div>
-            <div>
-              {metadata.frame_count} frames
-            </div>
-            <div>
-              {metadata.fps.toFixed(1)} fps
-            </div>
-          </div>
-        )}
+        {/* Center: Workspace Mode Pill */}
+        <div className="hidden md:flex items-center bg-neutral-900 border border-neutral-800 rounded-lg p-0.5 text-xs font-medium flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => setOutputUrl(null)}
+            className={`px-3 py-1 rounded-md transition ${
+              !outputUrl ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+            }`}
+          >
+            Annotate
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (latestRunId && outputUrl) setOutputUrl(outputUrl);
+            }}
+            disabled={!outputUrl}
+            className={`px-3 py-1 rounded-md transition ${
+              outputUrl ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-600 cursor-not-allowed'
+            }`}
+          >
+            Inspect Masks
+          </button>
+        </div>
+
+        {/* Right: Peek, Shortcuts, Action Button */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {videoSrc && !outputUrl && (
+            <button
+              type="button"
+              onClick={() => setIsPeekHidden((prev) => !prev)}
+              title="Peek original frame without mask (H)"
+              className={`p-1.5 px-2.5 rounded-lg border text-xs font-mono flex items-center gap-1.5 transition ${
+                isPeekHidden
+                  ? 'border-amber-500 bg-amber-950/40 text-amber-300'
+                  : 'border-neutral-800 hover:bg-neutral-800 text-neutral-300'
+              }`}
+            >
+              {isPeekHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">{isPeekHidden ? 'Mask Hidden' : 'Peek (H)'}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setIsShortcutsOpen(true)}
+            title="Keyboard shortcuts (?)"
+            className="p-1.5 rounded-lg border border-neutral-800 hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 transition"
+          >
+            <HelpCircle className="w-4 h-4" />
+          </button>
+
+          {/* Primary Action Button (VEED Signature Lime) */}
+          {videoSrc && !outputUrl && (
+            <button
+              type="button"
+              onClick={handleStartMaskJob}
+              disabled={!hasKeyframes || isProcessing}
+              className="px-4 py-1.5 rounded-lg bg-lime-500 hover:bg-lime-400 text-neutral-950 font-bold text-xs shadow-md transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+            >
+              {isProcessing ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Tracking...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5 fill-current" />
+                  <span>Generate Masks</span>
+                </>
+              )}
+            </button>
+          )}
+        </div>
       </header>
 
-      {/* Main Body */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 flex flex-col gap-6">
-        {/* Upload State */}
-        {!videoSrc && (
-          <div className="flex-1 flex flex-col items-center justify-center border border-dashed border-neutral-800 hover:border-neutral-600 rounded-xl p-16 transition bg-neutral-900/40">
-            <input
-              type="file"
-              id="video-upload"
-              accept="video/mp4,video/quicktime,video/webm"
-              onChange={handleFileSelect}
-              className="hidden"
-            />
-            <label
-              htmlFor="video-upload"
-              className="flex flex-col items-center gap-3 cursor-pointer text-center group"
+      {/* 2. Full-Page Studio Layout (Uses Entire Height & Width) */}
+      <div className="flex-1 flex w-full min-h-0 overflow-hidden">
+        {/* Left Vertical Icon Rail (VEED.IO style) */}
+        {videoSrc && (
+          <aside className="w-12 sm:w-14 flex-shrink-0 h-full bg-neutral-950 border-r border-neutral-800/80 flex flex-col items-center py-3 gap-2 z-20">
+            <button
+              type="button"
+              onClick={() => setActiveNavTab('tools')}
+              title="Selection Tools"
+              className={`w-9 h-9 rounded-xl flex items-center justify-center transition ${
+                activeNavTab === 'tools'
+                  ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+              }`}
             >
-              <div className="w-12 h-12 rounded-lg bg-neutral-800 group-hover:bg-neutral-700 flex items-center justify-center text-neutral-300 transition border border-neutral-700">
-                <UploadCloud className="w-6 h-6" />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="text-sm font-medium text-neutral-200 group-hover:text-white transition">
-                  Upload video file
-                </span>
-                <span className="text-xs text-neutral-500 font-mono">
-                  MP4, MOV, WEBM
-                </span>
-              </div>
-            </label>
+              <Lasso className="w-4 h-4" />
+            </button>
 
-            {isUploading && (
-              <div className="mt-4 flex items-center gap-2 text-xs text-neutral-400 font-mono">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-neutral-100" />
-                <span>Extracting frames...</span>
-              </div>
-            )}
-            {uploadError && (
-              <div className="mt-4 flex items-center gap-2 text-xs text-neutral-300 bg-neutral-900 border border-neutral-700 px-3 py-1.5 rounded">
-                <AlertCircle className="w-3.5 h-3.5 text-neutral-100" />
-                <span>{uploadError}</span>
-              </div>
-            )}
-          </div>
+            <button
+              type="button"
+              onClick={() => setActiveNavTab('keyframes')}
+              title="Keyframes Manager"
+              className={`w-9 h-9 rounded-xl flex items-center justify-center relative transition ${
+                activeNavTab === 'keyframes'
+                  ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+              }`}
+            >
+              <Bookmark className="w-4 h-4" />
+              {hasKeyframes && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveNavTab('samples')}
+              title="Demo Sample Videos"
+              className={`w-9 h-9 rounded-xl flex items-center justify-center transition ${
+                activeNavTab === 'samples'
+                  ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+              }`}
+            >
+              <Film className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveNavTab('settings')}
+              title="Dilation & Settings"
+              className={`w-9 h-9 rounded-xl flex items-center justify-center transition ${
+                activeNavTab === 'settings'
+                  ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                  : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+              }`}
+            >
+              <Sliders className="w-4 h-4" />
+            </button>
+          </aside>
         )}
 
-        {/* Live Progress Tracker during active pipeline execution */}
-        {isProcessing && jobProgress && (
-          <LiveProgressTracker
-            progress={jobProgress}
-            elapsedSeconds={elapsedSeconds}
-            totalFrames={metadata?.frame_count}
-            annotatedFrameIdx={currentFrame}
-            onCancel={handleCancelJob}
-            isCancelling={isCancelling}
-          />
-        )}
-
-        {/* Results View: Interactive Mask Preview Player */}
-        {outputUrl && videoSrc && metadata && (
-          <MaskPreviewPlayer
-            jobId={metadata.job_id}
-            revision={latestRunId || undefined}
-            videoSrc={videoSrc}
-            outputZipUrl={outputUrl}
-            totalFrames={metadata.frame_count}
-            fps={metadata.fps}
-            videoWidth={metadata.width}
-            videoHeight={metadata.height}
-            onReset={handleReset}
-            onAddAnotherSubject={handleAddAnotherSubject}
-          />
-        )}
-
-        {/* Interactive Editor State */}
-        {videoSrc && !outputUrl && (
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
-            {/* Left 3 cols: Video Viewport & Scrubber */}
-            <div className="lg:col-span-3 flex flex-col gap-3">
-              {/* Video and Overlay Stack */}
-              <div
-                ref={videoContainerRef}
-                className="relative w-full aspect-video bg-neutral-950 rounded-xl overflow-hidden border border-neutral-800 select-none"
-              >
-                {/* HTML5 Video Element */}
-                <video
-                  ref={videoRef}
-                  src={videoSrc}
-                  playsInline
-                  onTimeUpdate={handleTimeUpdate}
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
-                  onLoadedMetadata={(e) => {
-                    const target = e.currentTarget;
-                    if (!metadata) {
-                      setMetadata({
-                        job_id: `local-${Date.now()}`,
-                        fps: 30,
-                        frame_count: Math.round(target.duration * 30),
-                        width: target.videoWidth,
-                        height: target.videoHeight,
-                        duration: target.duration,
-                      });
-                    }
-                  }}
-                  className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                />
-
-                {/* Instant Mask Preview Overlay */}
-                {metadata && (
-                  <MaskOverlay
-                    maskBase64={maskBase64}
-                    videoWidth={metadata.width}
-                    videoHeight={metadata.height}
-                    containerWidth={containerSize.width}
-                    containerHeight={containerSize.height}
-                  />
-                )}
-
-                {/* Interactive Lasso Canvas */}
-                {metadata && (
-                  <VideoLassoCanvas
-                    videoRef={videoRef}
-                    videoWidth={metadata.width}
-                    videoHeight={metadata.height}
-                    currentFrameIdx={currentFrame}
-                    strokes={currentStrokes}
-                    onStrokesChange={handleStrokesChange}
-                    onStrokeCompleted={handleStrokeCompleted}
-                    strokeMode={strokeMode}
-                    onStrokeModeChange={setStrokeMode}
-                    canUndo={canUndo(strokeHistory, currentFrame)}
-                    canRedo={canRedo(strokeHistory, currentFrame)}
-                    onUndo={handleUndo}
-                    onRedo={handleRedo}
-                    onClearAll={handleClearStrokes}
-                    disabled={isProcessing}
-                  />
-                )}
-
-                {/* Live Preview Spinner */}
-                {isPreviewLoading && (
-                  <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5 bg-neutral-950/90 backdrop-blur px-2.5 py-1 rounded text-[11px] font-mono text-neutral-300 border border-neutral-800">
-                    <Loader2 className="w-3 h-3 animate-spin text-neutral-100" />
-                    <span>Predicting Mask...</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Timeline Scrubber */}
-              <TimelineControls
-                currentFrame={currentFrame}
-                totalFrames={metadata?.frame_count || 100}
-                fps={metadata?.fps || 30}
-                isPlaying={isPlaying}
-                onTogglePlay={handleTogglePlay}
-                onSeekFrame={handleSeekFrame}
-                onStepFrame={handleStepFrame}
-                keyframeIndices={Object.keys(keyframeStrokes).map((k) => parseInt(k, 10))}
-                disabled={isProcessing}
+        {/* Left Expanded Drawer Panel */}
+        {videoSrc && (
+          <aside className="w-60 sm:w-64 lg:w-72 flex-shrink-0 h-full bg-neutral-900/95 border-r border-neutral-800/80 p-3.5 flex flex-col gap-3.5 overflow-y-auto z-10">
+            {/* Replace / Upload Video */}
+            <div className="flex flex-col gap-2 flex-shrink-0">
+              <input
+                type="file"
+                id="video-replace-input"
+                accept="video/mp4,video/quicktime,video/webm"
+                onChange={handleFileSelect}
+                className="hidden"
               />
+              <label
+                htmlFor="video-replace-input"
+                className="w-full py-2 px-3 rounded-xl bg-lime-500 hover:bg-lime-400 text-neutral-950 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-sm active:scale-98 transition"
+              >
+                <Video className="w-3.5 h-3.5" />
+                <span>Replace Video</span>
+              </label>
             </div>
 
-            {/* Right 1 col: Minimal Settings Sidebar */}
-            <div className="flex flex-col gap-4 bg-neutral-900 border border-neutral-800 rounded-xl p-4">
-              <div className="flex items-center justify-between border-b border-neutral-800 pb-2.5">
-                <span className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
-                  <Sliders className="w-3.5 h-3.5 text-neutral-400" />
-                  Settings
-                </span>
-                <span className="font-mono text-[11px] text-neutral-400">
-                  {currentStrokes.length} stroke{currentStrokes.length !== 1 ? 's' : ''} (Frame {currentFrame})
-                </span>
-              </div>
-
-              {/* Mode indicator if accumulating masks */}
-              {accumulateMode && (
-                <div className="flex items-center justify-between bg-emerald-950/40 border border-emerald-800/80 p-2 rounded-lg text-emerald-300 text-xs font-mono">
-                  <span>Merging with existing masks</span>
-                  <button
-                    type="button"
-                    onClick={() => setAccumulateMode(false)}
-                    className="text-[10px] text-neutral-400 hover:text-white underline ml-2"
-                  >
-                    Replace instead
-                  </button>
-                </div>
-              )}
-
-              {/* Instructions */}
-              <div className="text-[11px] text-neutral-400 bg-neutral-950 p-2.5 rounded-lg border border-neutral-800/80 leading-relaxed font-mono">
-                • Draw around any subject or reflection.<br/>
-                • Scrub to any frame where elements enter or slip to add keyframe guidance.<br/>
-                {accumulateMode && <span className="text-emerald-400 font-semibold">• New masks will merge on top of your previous masks.</span>}
-              </div>
-
-              {/* Keyframes badge list */}
-              {Object.keys(keyframeStrokes).length > 0 && (
-                <div className="flex flex-col gap-1.5 bg-neutral-950/60 p-2 rounded-lg border border-neutral-800">
-                  <span className="text-[10px] uppercase font-mono text-neutral-400">
-                    Keyframes ({Object.keys(keyframeStrokes).length})
+            {/* TAB: Tools */}
+            {activeNavTab === 'tools' && (
+              <div className="flex flex-col gap-3.5">
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400">
+                    Selection Tool
                   </span>
-                  <div className="flex flex-wrap gap-1">
+                  <div className="grid grid-cols-3 gap-1 bg-neutral-950 p-1 rounded-xl border border-neutral-800">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTool('lasso')}
+                      className={`flex flex-col items-center gap-1 py-1.5 rounded-lg text-[10px] font-medium transition ${
+                        activeTool === 'lasso'
+                          ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      <Lasso className="w-3.5 h-3.5" />
+                      <span>Lasso (1)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTool('box')}
+                      className={`flex flex-col items-center gap-1 py-1.5 rounded-lg text-[10px] font-medium transition ${
+                        activeTool === 'box'
+                          ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      <Square className="w-3.5 h-3.5" />
+                      <span>Box (2)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTool('point')}
+                      className={`flex flex-col items-center gap-1 py-1.5 rounded-lg text-[10px] font-medium transition ${
+                        activeTool === 'point'
+                          ? 'bg-neutral-800 text-lime-400 shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      <CircleDot className="w-3.5 h-3.5" />
+                      <span>Point (3)</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400">
+                    Prompt Mode
+                  </span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setStrokeMode('include')}
+                      className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-xl text-xs font-semibold border transition ${
+                        strokeMode === 'include'
+                          ? 'border-cyan-500 bg-cyan-950/40 text-cyan-300 shadow-sm'
+                          : 'border-neutral-800 bg-neutral-950 text-neutral-400 hover:border-neutral-700'
+                      }`}
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Include (I)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStrokeMode('exclude')}
+                      className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-xl text-xs font-semibold border transition ${
+                        strokeMode === 'exclude'
+                          ? 'border-rose-500 bg-rose-950/40 text-rose-300 shadow-sm'
+                          : 'border-neutral-800 bg-neutral-950 text-neutral-400 hover:border-neutral-700'
+                      }`}
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                      <span>Exclude (E)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {accumulateMode && (
+                  <div className="p-2.5 rounded-xl bg-lime-950/30 border border-lime-800/60 text-lime-300 text-xs">
+                    <span className="font-semibold block mb-0.5">Merging with Previous Masks</span>
+                    New masks will be bitwise-OR combined with existing masks.
+                  </div>
+                )}
+
+                {/* Instructions */}
+                <div className="text-[11px] text-neutral-400 bg-neutral-950 p-3 rounded-xl border border-neutral-800/80 leading-relaxed font-mono">
+                  <span className="text-lime-400 font-semibold block mb-1">Quick Workflow:</span>
+                  1. Draw around your subject.<br />
+                  2. Scrub to any drift frame & add guidance.<br />
+                  3. Click <span className="text-white font-bold">Generate Masks</span>.
+                </div>
+              </div>
+            )}
+
+            {/* TAB: Keyframes */}
+            {activeNavTab === 'keyframes' && (
+              <div className="flex flex-col gap-2">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400">
+                  Annotated Keyframes ({Object.keys(keyframeStrokes).length})
+                </span>
+
+                {Object.keys(keyframeStrokes).length === 0 ? (
+                  <p className="text-xs text-neutral-500 font-mono py-4 text-center">
+                    No keyframes added yet.<br />Draw on any frame to pin a keyframe.
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
                     {Object.keys(keyframeStrokes).map((fStr) => {
                       const f = parseInt(fStr, 10);
                       const isCur = f === currentFrame;
+                      const strokesCount = keyframeStrokes[f]?.length || 0;
                       return (
-                        <button
+                        <div
                           key={f}
-                          type="button"
-                          onClick={() => handleSeekFrame(f)}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition ${
+                          className={`flex items-center justify-between p-2 rounded-xl border text-xs font-mono transition ${
                             isCur
-                              ? 'bg-neutral-100 text-neutral-950 font-bold'
-                              : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                              ? 'bg-neutral-800 border-lime-500/80 text-white shadow-sm'
+                              : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:border-neutral-700'
                           }`}
                         >
-                          F{f}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSeekFrame(f)}
+                            className="flex items-center gap-2 flex-1 text-left"
+                          >
+                            <Bookmark className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Frame {f} ({strokesCount} strokes)</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteKeyframe(f)}
+                            title="Delete keyframe"
+                            className="p-1 rounded hover:bg-neutral-800 text-neutral-400 hover:text-rose-400 transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB: Samples */}
+            {activeNavTab === 'samples' && (
+              <div className="flex flex-col gap-2">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400">
+                  Demo Sample Videos
+                </span>
+                <p className="text-[11px] text-neutral-400">
+                  Test SAM 2 tracking with built-in procedural test clips:
+                </p>
+                <div className="flex flex-col gap-2">
+                  {SAMPLE_VIDEOS.map((sample) => (
+                    <button
+                      key={sample.id}
+                      type="button"
+                      onClick={() => handleLoadSample(sample)}
+                      disabled={isLoadingSample !== null}
+                      className="p-2.5 rounded-xl bg-neutral-950 hover:bg-neutral-800/80 border border-neutral-800 text-left transition flex flex-col gap-1 text-xs"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-neutral-200">{sample.title}</span>
+                        <span className="font-mono text-[10px] text-lime-400">{sample.duration}</span>
+                      </div>
+                      <span className="text-[11px] text-neutral-500 leading-tight">
+                        {sample.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB: Settings */}
+            {activeNavTab === 'settings' && (
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-neutral-300">Mask Dilation</span>
+                    <span className="font-mono text-lime-400 font-bold">{dilationPx}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={50}
+                    value={dilationPx}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setDilationPx(val);
+                      if (currentStrokes.length > 0) {
+                        requestMaskPreview(currentStrokes);
+                      }
+                    }}
+                    className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-lime-400"
+                  />
+                  <span className="text-[10px] text-neutral-500 font-mono">
+                    Expands mask boundaries to safely capture soft edges.
+                  </span>
+                </div>
+              </div>
+            )}
+          </aside>
+        )}
+
+        {/* Main Central Viewport: Uses entire remaining width & height */}
+        <main className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-neutral-950 relative">
+          {/* A. When NO video is loaded: VEED.IO Modal Upload Dropzone */}
+          {!videoSrc && (
+            <div className="flex-1 flex items-center justify-center p-4 sm:p-6 bg-neutral-950 overflow-y-auto">
+              <div className="w-full max-w-3xl bg-neutral-900 border border-neutral-800 rounded-2xl p-6 sm:p-8 flex flex-col items-center gap-5 shadow-2xl my-auto">
+                <div className="text-center flex flex-col gap-1">
+                  <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-neutral-100">
+                    Let's make a video mask
+                  </h1>
+                  <p className="text-xs text-neutral-400 font-mono">
+                    High-performance temporal tracking powered by Meta SAM 2
+                  </p>
+                </div>
+
+                {/* Dropzone container matching Screenshot 0 */}
+                <div
+                  className={`w-full border-2 border-dashed rounded-2xl p-8 sm:p-10 flex flex-col items-center justify-center gap-4 transition ${
+                    isDraggingFile
+                      ? 'border-lime-400 bg-lime-950/20'
+                      : 'border-neutral-800 hover:border-neutral-700 bg-neutral-950/50'
+                  }`}
+                >
+                  <input
+                    type="file"
+                    id="video-upload-main"
+                    accept="video/mp4,video/quicktime,video/webm"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+
+                  <div className="w-12 h-12 rounded-xl bg-neutral-800 flex items-center justify-center text-neutral-300 border border-neutral-700">
+                    <UploadCloud className="w-6 h-6 text-lime-400" />
+                  </div>
+
+                  <div className="flex flex-col items-center gap-2 text-center">
+                    <span className="text-xs text-neutral-400 font-mono">
+                      Drop media here or
+                    </span>
+                    <label
+                      htmlFor="video-upload-main"
+                      className="px-5 py-2.5 rounded-xl bg-lime-500 hover:bg-lime-400 text-neutral-950 font-bold text-xs flex items-center gap-2 cursor-pointer shadow-md active:scale-95 transition"
+                    >
+                      <UploadCloud className="w-4 h-4 stroke-[2.5]" />
+                      <span>Upload from computer</span>
+                    </label>
+                    <span className="text-[10px] text-neutral-500 font-mono">
+                      MP4, MOV, WEBM • Up to 2GB supported
+                    </span>
+                  </div>
+
+                  {isUploading && (
+                    <div className="flex items-center gap-2 text-xs font-mono text-lime-400 mt-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Extracting frames & initializing SAM 2...</span>
+                    </div>
+                  )}
+
+                  {uploadError && (
+                    <div className="flex items-center gap-2 text-xs text-rose-300 bg-rose-950/40 border border-rose-900/80 px-3 py-1.5 rounded-lg mt-2">
+                      <AlertCircle className="w-4 h-4 text-rose-400" />
+                      <span>{uploadError}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Bottom Sample Video Quick Cards matching Screenshot 0 */}
+                <div className="w-full flex flex-col gap-2">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400">
+                    Or try instant sample video:
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    {SAMPLE_VIDEOS.map((sample) => (
+                      <button
+                        key={sample.id}
+                        type="button"
+                        onClick={() => handleLoadSample(sample)}
+                        disabled={isLoadingSample !== null}
+                        className="p-3 rounded-xl bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 hover:border-neutral-700 text-left transition flex flex-col gap-1 group active:scale-98"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-neutral-200 group-hover:text-white">
+                            {sample.title}
+                          </span>
+                          <span className="font-mono text-[10px] text-lime-400 bg-lime-950/60 px-1.5 py-0.5 rounded border border-lime-800/60">
+                            {sample.duration}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-neutral-400 leading-tight">
+                          {sample.description}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* B. When video IS loaded: Results Player OR Editor Canvas filling 100% height */}
+          {videoSrc && (
+            <div className="flex-1 flex flex-col min-h-0 w-full overflow-hidden p-2 sm:p-3 gap-2">
+              {/* Output Player View */}
+              {outputUrl && metadata ? (
+                <div className="flex-1 w-full h-full min-h-0 overflow-hidden">
+                  <MaskPreviewPlayer
+                    jobId={metadata.job_id}
+                    revision={latestRunId || undefined}
+                    videoSrc={videoSrc}
+                    outputZipUrl={outputUrl}
+                    totalFrames={metadata.frame_count}
+                    fps={metadata.fps}
+                    videoWidth={metadata.width}
+                    videoHeight={metadata.height}
+                    onReset={handleReset}
+                    onAddAnotherSubject={handleAddAnotherSubject}
+                  />
+                </div>
+              ) : (
+                /* Interactive Editor Canvas: Scales to available screen height & width */
+                <div className="flex-1 flex flex-col min-h-0 w-full overflow-hidden gap-2">
+                  {/* Canvas Viewport: Expands responsively */}
+                  <div
+                    ref={videoContainerRef}
+                    className="flex-1 relative w-full min-h-0 bg-neutral-950 rounded-2xl overflow-hidden border border-neutral-800 select-none shadow-2xl flex items-center justify-center"
+                  >
+                    {/* HTML5 Video Element */}
+                    <video
+                      ref={videoRef}
+                      src={videoSrc}
+                      playsInline
+                      onTimeUpdate={handleTimeUpdate}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                    />
+
+                    {/* Instant Mask Preview Overlay (hidden if peek is active) */}
+                    {metadata && !isPeekHidden && (
+                      <MaskOverlay
+                        maskBase64={maskBase64}
+                        videoWidth={metadata.width}
+                        videoHeight={metadata.height}
+                        containerWidth={containerSize.width}
+                        containerHeight={containerSize.height}
+                      />
+                    )}
+
+                    {/* Interactive Lasso Canvas supporting Point, Box, Lasso */}
+                    {metadata && (
+                      <VideoLassoCanvas
+                        videoRef={videoRef}
+                        videoWidth={metadata.width}
+                        videoHeight={metadata.height}
+                        currentFrameIdx={currentFrame}
+                        strokes={currentStrokes}
+                        onStrokesChange={handleStrokesChange}
+                        onStrokeCompleted={handleStrokeCompleted}
+                        strokeMode={strokeMode}
+                        onStrokeModeChange={setStrokeMode}
+                        activeTool={activeTool}
+                        onToolChange={setActiveTool}
+                        canUndo={canUndo(strokeHistory, currentFrame)}
+                        canRedo={canRedo(strokeHistory, currentFrame)}
+                        onUndo={handleUndo}
+                        onRedo={handleRedo}
+                        onClearAll={handleClearStrokes}
+                        disabled={isProcessing}
+                      />
+                    )}
+
+                    {/* Live Preview Predicting Spinner */}
+                    {isPreviewLoading && (
+                      <div className="absolute top-3 right-3 z-30 flex items-center gap-1.5 bg-neutral-950/90 backdrop-blur px-3 py-1.5 rounded-lg text-xs font-mono text-lime-400 border border-neutral-800 shadow-md">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Predicting Mask...</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Canvas Info Strip matching VEED.IO */}
+                  <div className="flex-shrink-0 flex items-center justify-between text-[11px] font-mono text-neutral-400 px-2 py-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800">
+                        {metadata?.width && metadata?.height
+                          ? `${metadata.width}×${metadata.height}`
+                          : '16:9'}
+                      </span>
+                      <span>
+                        {metadata?.frame_count || 0} Frames @ {metadata?.fps.toFixed(1) || 30} FPS
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-neutral-500">
+                      <span>Tool: <strong className="text-neutral-200 capitalize">{activeTool}</strong></span>
+                      <span>•</span>
+                      <span>Mode: <strong className={strokeMode === 'include' ? 'text-cyan-400' : 'text-rose-400'}>{strokeMode}</strong></span>
+                    </div>
+                  </div>
+
+                  {/* Professional Bottom Timeline docked at bottom */}
+                  <div className="flex-shrink-0 w-full">
+                    <TimelineControls
+                      currentFrame={currentFrame}
+                      totalFrames={metadata?.frame_count || 100}
+                      fps={metadata?.fps || 30}
+                      isPlaying={isPlaying}
+                      onTogglePlay={handleTogglePlay}
+                      onSeekFrame={handleSeekFrame}
+                      onStepFrame={handleStepFrame}
+                      keyframeIndices={Object.keys(keyframeStrokes).map((k) => parseInt(k, 10))}
+                      disabled={isProcessing}
+                    />
+                  </div>
                 </div>
               )}
+            </div>
+          )}
 
-              {/* Dilation Slider */}
-              <div className="flex flex-col gap-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-neutral-300 text-xs">Mask Dilation</span>
-                  <span className="font-mono text-neutral-100 font-semibold text-xs">{dilationPx}px</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={50}
-                  value={dilationPx}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value, 10);
-                    setDilationPx(val);
-                    if (currentStrokes.length > 0) {
-                      requestMaskPreview(currentStrokes);
-                    }
-                  }}
-                  disabled={isProcessing}
-                  className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-neutral-100"
+          {/* Floating In-Flight Propagation Modal / Drawer */}
+          {isProcessing && jobProgress && (
+            <div className="fixed inset-x-0 bottom-4 z-50 max-w-2xl mx-auto px-4 animate-in slide-in-from-bottom-6 duration-200">
+              <div className="shadow-2xl">
+                <LiveProgressTracker
+                  progress={jobProgress}
+                  elapsedSeconds={elapsedSeconds}
+                  totalFrames={metadata?.frame_count}
+                  annotatedFrameIdx={currentFrame}
+                  onCancel={handleCancelJob}
+                  isCancelling={isCancelling}
                 />
               </div>
-
-              {/* Mask generation action */}
-              <button
-                type="button"
-                onClick={handleStartMaskJob}
-                disabled={Object.keys(keyframeStrokes).length === 0 || isProcessing}
-                className="w-full mt-2 py-2 px-3 rounded-lg bg-neutral-100 hover:bg-white text-neutral-950 font-semibold text-xs transition active:scale-[0.98] disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
-              >
-                {isProcessing ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Processing...</span>
-                  </>
-                ) : (
-                  <>
-                    <CircleDot className="w-3.5 h-3.5" />
-                    <span>Generate Masks</span>
-                  </>
-                )}
-              </button>
             </div>
-          </div>
-        )}
-      </main>
+          )}
+        </main>
+      </div>
+
+      {/* Keyboard Shortcuts Modal */}
+      <ShortcutsModal
+        isOpen={isShortcutsOpen}
+        onClose={() => setIsShortcutsOpen(false)}
+      />
     </div>
   );
 };
