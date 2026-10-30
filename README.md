@@ -8,14 +8,33 @@ Draw lasso loops around target subjects or secondary elements (e.g. cast shadows
 
 ## Key Features
 
+- **Primary SAM 2 Large with Automated Small Fallback**:
+  - Leverages **SAM 2.1 Hiera Large** (`sam2.1_hiera_large.pt`) as the primary high-accuracy model.
+  - Automatically checks VRAM (< 1.2 GB free) and catches CUDA `OutOfMemoryError` during propagation or loading, gracefully falling back to **SAM 2.1 Hiera Small** (`sam2.1_hiera_small.pt`) with zero disruption.
+
+- **Full-Page Studio UI (VEED.IO Inspired)**:
+  - Responsive full-screen studio layout (`w-screen h-screen overflow-hidden`) maximizing canvas real estate.
+  - Left navigation rail with quick-access tabs: **Tools**, **Keyframes**, **Samples**, and **Settings**.
+  - Smart Selection Tools: **Freehand Lasso** (`1`), **Bounding Box** (`2`), and **Point Prompts** (`3`).
+  - High-visibility **Include** (`I`, cyan) and **Exclude** (`E`, rose) prompt modes.
+  - **Peek Mode** (`H`): Instantly toggle visibility of masks and annotations to examine the clean raw frame.
+  - **Procedural Sample Videos**: Built-in procedural video generator (`Moving Sphere`, `Pulsing Hexagon`, `Dual Orbiting Circles`) allowing instant end-to-end testing without external file uploads.
+
 - **Multi-Object Separation & Union**:
   - Enclosing subject strokes and secondary reflection/shadow strokes are registered as distinct tracking entities (`obj_id=1`, `obj_id=2`), preventing high-contrast solid bodies from suppressing subtle reflections or shadows over temporal propagation.
   - Exclude strokes place negative prompt anchors distributed across all active objects.
   - Single-frame preview and full-video propagation both compute the pixelwise union of include objects.
 
-- **Multi-Keyframe Refinement**:
-  - Scrub to any frame where tracking slips or new elements enter the frame.
-  - Add guidance strokes at arbitrary keyframes; SAM 2 conditions bidirectionally from all annotated frames.
+- **Multi-Keyframe Refinement & Timeline**:
+  - Full-width timeline with time ruler ticks, zoom slider, hover time preview, and clickable diamond keyframe pins.
+  - Scrub to any frame where tracking slips or new elements enter; SAM 2 conditions bidirectionally from all annotated frames.
+  - Jump between keyframes using `[` and `]` shortcuts.
+
+- **Resilient Reactive Tracking & State Management**:
+  - Top-level reactive polling and EventSource subscription that survives Vite HMR updates, component remounts, and network disconnects.
+  - Dedicated `viewMode: 'annotate' | 'inspect'` decoupled from mask download URLs, allowing free toggling between editing and inspecting without re-running.
+  - Automatic backend mask detection on load: instantly activates the "Inspect Masks" tab if output masks already exist for the job.
+  - Synchronous worker progress updates in memory ensuring zero-latency response for `/api/v1/jobs/{job_id}/status`.
 
 - **Deterministic Fallback Engine**:
   - Environments without model weights or GPU acceleration use a deterministic geometric approximation engine supporting multi-keyframe, multi-object guidance, and mask accumulation.
@@ -34,13 +53,14 @@ Draw lasso loops around target subjects or secondary elements (e.g. cast shadows
   - Video uploads stream in 1MB chunks counting bytes against configurable thresholds (`MAX_UPLOAD_SIZE_BYTES`), returning HTTP 413 if exceeded.
   - Partial uploads and failed probe/extraction directories are automatically cleaned up.
 
-- **Workspace Retention sweeps**:
+- **Workspace Retention Sweeps**:
   - Configurable retention sweeps (`WORKSPACE_RETENTION_HOURS`, default 24h) prune expired jobs asynchronously.
   - Actively running jobs are protected and path containment prevents deletions outside `WORKSPACE_DIR`.
 
-- **Interactive Mask Preview Player**:
+- **Interactive Mask Inspection Player**:
   - Synchronized video and mask playback using `requestVideoFrameCallback` with lookahead image preloading.
-  - Three inspection modes: **Synced Overlay** (with Cyan, Red, Lime tints and opacity slider), **Split View** (source vs mask side-by-side), and **Binary Mask** (monochromatic inspection).
+  - Four inspection modes: **Interactive Split Curtain Wipe** (with draggable split divider), **Synced Overlay** (with Cyan, Red, Lime tints and opacity slider), **Split View** (source vs mask side-by-side), and **Binary Mask** (monochromatic inspection).
+  - Variable playback speed (`0.25x`, `0.5x`, `1x`, `1.5x`, `2x`), loop playback, and fullscreen viewer.
   - Seamless **Add / Refine Mask** accumulation workflow.
 
 - **Per-Keyframe Stroke Undo & Redo**:
@@ -108,13 +128,25 @@ The SSE stream emits real-time progress events:
 
 ## Keyboard Shortcuts
 
-| Shortcut (Mac) | Shortcut (Windows/Linux) | Action |
-| :--- | :--- | :--- |
-| `⌘ + Z` | `Ctrl + Z` | Undo last stroke on active keyframe |
-| `⌘ + ⇧ + Z` | `Ctrl + ⇧ + Z` / `Ctrl + Y` | Redo undone stroke on active keyframe |
-| `Space` | `Space` | Play / Pause video in player or editor |
+| Shortcut (Mac) | Shortcut (Windows/Linux) | Action | Category |
+| :--- | :--- | :--- | :--- |
+| `⌘ + Z` | `Ctrl + Z` | Undo last stroke on active keyframe | History |
+| `⌘ + ⇧ + Z` | `Ctrl + ⇧ + Z` / `Ctrl + Y` | Redo undone stroke on active keyframe | History |
+| `Space` | `Space` | Play / Pause video in player or editor | Playback |
+| `←` / `→` | `←` / `→` | Step 1 frame backward / forward | Navigation |
+| `⇧ + ←` / `⇧ + →` | `Shift + ←` / `Shift + →` | Step 10 frames backward / forward | Navigation |
+| `[` | `[` | Jump to previous annotated keyframe | Keyframes |
+| `]` | `]` | Jump to next annotated keyframe | Keyframes |
+| `1` | `1` | Activate Freehand Lasso tool | Tools |
+| `2` | `2` | Activate Bounding Box tool | Tools |
+| `3` | `3` | Activate Point Prompt tool | Tools |
+| `I` | `I` | Switch to Include prompt mode (cyan) | Mode |
+| `E` | `E` | Switch to Exclude prompt mode (rose) | Mode |
+| `H` | `H` | Toggle Peek mode (hide/show mask preview) | Visibility |
+| `?` | `?` | Toggle keyboard shortcuts modal | Help |
+| `Esc` | `Esc` | Close modal or cancel preview | Dialog |
 
-Shortcuts are automatically bypassed when focusing input fields or editable text areas.
+Shortcuts are automatically bypassed when focusing input fields, textareas, or editable text elements.
 
 ---
 
@@ -124,6 +156,10 @@ Settings can be customized via environment variables:
 
 | Variable | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `DEFAULT_SAM2_CONFIG` | string | `configs/sam2.1/sam2.1_hiera_l.yaml` | Primary SAM 2 configuration file. |
+| `DEFAULT_SAM2_CHECKPOINT` | string | `checkpoints/sam2/sam2.1_hiera_large.pt` | Primary SAM 2 Large checkpoint path. |
+| `FALLBACK_SAM2_CONFIG` | string | `configs/sam2.1/sam2.1_hiera_s.yaml` | Fallback SAM 2 Small configuration file. |
+| `FALLBACK_SAM2_CHECKPOINT` | string | `checkpoints/sam2/sam2.1_hiera_small.pt` | Fallback SAM 2 Small checkpoint path. |
 | `MAX_UPLOAD_SIZE_BYTES` | integer | `2147483648` (2 GB) | Maximum allowable video upload size in bytes. Returns HTTP 413 on breach. |
 | `WORKSPACE_RETENTION_HOURS` | integer | `24` | Age threshold in hours before orphaned workspace jobs are eligible for cleanup. |
 | `WORKSPACE_CLEANUP_INTERVAL_SECONDS` | float | `3600.0` (1 hr) | Interval between automatic background workspace retention sweeps. |
@@ -138,41 +174,45 @@ Settings can be customized via environment variables:
 ```text
 stirs/
 ├── backend/
-│   ├── config.py                 # Paths, device autodetection, limits, model variants
+│   ├── config.py                 # Paths, device autodetection, limits, model variants (Large + Small fallback)
 │   ├── main.py                   # FastAPI application, streaming uploads, SSE, static mounts
 │   ├── schemas.py                # Pydantic request/response and progress models
 │   ├── core/
 │   │   ├── geometry.py           # Multi-object stroke conversion and bounding box calculation
-│   │   ├── sam2_engine.py        # Cached SAM 2 singleton, AMP bfloat16, fallback tracking
+│   │   ├── sam2_engine.py        # Primary SAM 2 Large with automatic Small fallback & AMP
 │   │   └── video_io.py           # FFmpeg probing and numbered frame extraction
 │   ├── tasks/
 │   │   └── worker.py             # Run-scoped execution, safe staging, atomic publication
 │   └── tests/
 │       ├── test_api.py           # Full upload and propagation integration test
 │       ├── test_geometry.py      # Stroke geometry, scribbles, and multi-object parsing
+│       ├── test_model_selection_and_fallback.py # Large/Small model fallback tests
 │       ├── test_preview_parity.py# Multi-object preview, fallback parity, and accumulation tests
-│       └── test_upload_and_lifecycle.py # Upload limits, runs, cancellation, retention tests
+│       ├── test_upload_and_lifecycle.py # Upload limits, runs, cancellation, retention tests
+│       └── test_video_io.py      # Frame probing and extraction tests
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx               # Primary workflow coordinator, run state, and keyboard shortcuts
+│   │   ├── App.tsx               # Studio layout, reactive job tracking, and keyboard shortcuts
 │   │   ├── components/
-│   │   │   ├── VideoLassoCanvas.tsx   # Interactive canvas with undo/redo floating controls
+│   │   │   ├── VideoLassoCanvas.tsx   # Interactive canvas (Lasso, Bounding Box, Point Prompts)
 │   │   │   ├── MaskOverlay.tsx        # Instant single-frame preview overlay
-│   │   │   ├── TimelineControls.tsx   # Video scrubber with keyframe bookmark pins
-│   │   │   ├── LiveProgressTracker.tsx# Real-time telemetry, stage indicators, and Cancel button
-│   │   │   └── MaskPreviewPlayer.tsx  # Synchronized player with cache-busting revision support
+│   │   │   ├── TimelineControls.tsx   # Video scrubber with time ruler and diamond keyframe pins
+│   │   │   ├── LiveProgressTracker.tsx# Real-time telemetry, stage indicators, View Masks, Cancel
+│   │   │   ├── MaskPreviewPlayer.tsx  # Inspection player with split curtain wipe & speeds
+│   │   │   └── ShortcutsModal.tsx     # Keyboard shortcuts modal cheatsheet
 │   │   ├── types/api.ts          # TypeScript interfaces for API schemas and progress events
 │   │   └── utils/
 │   │       ├── coordinateMap.ts  # Aspect ratio & letterbox coordinate mapping
 │   │       ├── coordinateMap.test.ts # Coordinate mapping unit tests
+│   │       ├── sampleVideos.ts   # Procedural sample video generator (Sphere, Hexagon, Orbits)
 │   │       ├── strokeHistory.ts  # Per-keyframe bounded undo/redo history engine
 │   │       └── strokeHistory.test.ts # Undo/redo boundary condition unit tests
 │   └── package.json
-├── checkpoints/sam2/             # SAM 2 weights directory (e.g. sam2.1_hiera_small.pt)
+├── checkpoints/sam2/             # Model checkpoints (sam2.1_hiera_large.pt, sam2.1_hiera_small.pt)
 ├── workspace/                    # Ephemeral job data (raw_video, frames, staging, published masks)
 ├── scripts/
-│   ├── launch.sh                 # Single-command environment setup and application launcher
-│   └── setup_weights.sh          # Automated checkpoint downloader
+│   ├── launch.sh                 # Multi-distro Linux & macOS single-command setup & launcher
+│   └── setup_weights.sh          # Automated checkpoint downloader for Large & Small models
 └── README.md
 ```
 
