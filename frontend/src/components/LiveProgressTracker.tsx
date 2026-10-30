@@ -16,6 +16,7 @@ interface LiveProgressTrackerProps {
   annotatedFrameIdx?: number | null;
   onCancel?: () => void;
   isCancelling?: boolean;
+  onViewMasks?: () => void;
 }
 
 interface StageStep {
@@ -47,6 +48,7 @@ export const LiveProgressTracker: React.FC<LiveProgressTrackerProps> = ({
   annotatedFrameIdx,
   onCancel,
   isCancelling = false,
+  onViewMasks,
 }) => {
   const currentStepIdx = STAGE_ORDER[progress.stage] ?? 0;
   const isFailed = progress.stage === 'failed';
@@ -95,6 +97,16 @@ export const LiveProgressTracker: React.FC<LiveProgressTrackerProps> = ({
             <div className="bg-neutral-950 px-2 py-1 rounded border border-neutral-800">
               <span>Frame #{annotatedFrameIdx}</span>
             </div>
+          )}
+          {onViewMasks && isCompleted && (
+            <button
+              type="button"
+              onClick={onViewMasks}
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-lime-500 hover:bg-lime-400 text-neutral-950 font-bold text-xs shadow-md transition active:scale-95"
+            >
+              <Check className="w-3.5 h-3.5 stroke-[3]" />
+              <span>View Masks</span>
+            </button>
           )}
           {onCancel && !isFailed && !isCompleted && progress.stage !== 'cancelled' && (
             <button

@@ -123,10 +123,23 @@ def run_sync_pipeline(
     cancel_event = CANCELLATION_EVENTS.get(actual_run_id) or CANCELLATION_EVENTS.get(job_id)
 
     def send_event(stage: str, progress: int, output_url: Optional[str] = None, error: Optional[str] = None):
-        asyncio.run_coroutine_threadsafe(
-            emit_progress(job_id, stage, progress, run_id=actual_run_id, output_url=output_url, error=error),
-            actual_loop
-        )
+        payload = {
+            "stage": stage,
+            "progress": progress,
+            "run_id": actual_run_id,
+            "output_url": output_url,
+            "error": error
+        }
+        if actual_run_id:
+            LAST_PROGRESS[actual_run_id] = progress
+            RUN_STATUS[actual_run_id] = payload
+        LAST_PROGRESS[job_id] = progress
+        JOB_STATUS[job_id] = payload
+        if actual_loop and actual_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                emit_progress(job_id, stage, progress, run_id=actual_run_id, output_url=output_url, error=error),
+                actual_loop
+            )
 
     job_dir = config.WORKSPACE_DIR / job_id
     staging_masks_dir = job_dir / f"masks_staging_{actual_run_id}"

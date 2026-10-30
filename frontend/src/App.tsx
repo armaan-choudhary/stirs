@@ -96,6 +96,9 @@ export const App: React.FC = () => {
     }
   }, [currentFrame, currentKeyframePreviews, keyframeStrokes]);
 
+  // View mode: 'annotate' (canvas editor) or 'inspect' (split/wipe mask viewer)
+  const [viewMode, setViewMode] = useState<'annotate' | 'inspect'>('annotate');
+
   // Processing & SSE state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [accumulateMode, setAccumulateMode] = useState<boolean>(false);
@@ -106,15 +109,134 @@ export const App: React.FC = () => {
   const [latestRunId, setLatestRunId] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState<boolean>(false);
   const timerRef = useRef<number | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const pollIntervalRef = useRef<number | null>(null);
 
-  // Clean up timers and SSE connections on unmount
+  // Check backend for existing mask output when video/metadata is loaded
+  useEffect(() => {
+    if (!metadata?.job_id) return;
+    let isMounted = true;
+
+    const checkExistingJobStatus = async () => {
+      try {
+        const res = await fetch(`/api/v1/jobs/${metadata.job_id}/status`);
+        if (!res.ok) return;
+        const data: JobProgressEvent = await res.json();
+        if (!isMounted) return;
+
+        if (data.stage === 'completed' && data.output_url) {
+          setOutputUrl(data.output_url);
+          if (data.run_id) setLatestRunId(data.run_id);
+        }
+      } catch (err) {
+        console.debug('No existing output masks for job:', err);
+      }
+    };
+
+    checkExistingJobStatus();
+    return () => {
+      isMounted = false;
+    };
+  }, [metadata?.job_id]);
+
+  // Robust, reactive job tracking via SSE with synchronized polling fallback
+  useEffect(() => {
+    if (!isProcessing || !metadata?.job_id) return;
+
+    let isMounted = true;
+    const runId = currentRunId;
+    const statusUrl = runId
+      ? `/api/v1/jobs/${metadata.job_id}/status?run_id=${runId}`
+      : `/api/v1/jobs/${metadata.job_id}/status`;
+    const eventsUrl = runId
+      ? `/api/v1/jobs/${metadata.job_id}/events?run_id=${runId}`
+      : `/api/v1/jobs/${metadata.job_id}/events`;
+
+    const handleTerminalState = (data: JobProgressEvent) => {
+      setJobProgress(data);
+      if (data.stage === 'completed') {
+        setIsProcessing(false);
+        setIsCancelling(false);
+        if (data.output_url) {
+          setOutputUrl(data.output_url);
+        }
+        if (data.run_id) {
+          setLatestRunId(data.run_id);
+        }
+        setCurrentRunId(null);
+        setViewMode('inspect');
+      } else if (data.stage === 'failed' || data.stage === 'cancelled') {
+        setIsProcessing(false);
+        setIsCancelling(false);
+        setCurrentRunId(null);
+      }
+    };
+
+    // Immediate poll check on mount / trigger
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch(statusUrl);
+        if (!res.ok || !isMounted) return;
+        const data: JobProgressEvent = await res.json();
+        if (!isMounted) return;
+
+        if (data && data.stage) {
+          if (runId && data.run_id && data.run_id !== runId) return;
+          if (data.stage === 'completed' || data.stage === 'failed' || data.stage === 'cancelled') {
+            handleTerminalState(data);
+          } else {
+            setJobProgress(data);
+          }
+        }
+      } catch (err) {
+        console.warn('Status poll error:', err);
+      }
+    };
+
+    fetchStatus();
+    const pollInterval = window.setInterval(fetchStatus, 750);
+
+    // SSE connection
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource(eventsUrl);
+      const onProgress = (event: MessageEvent) => {
+        if (!isMounted) return;
+        try {
+          const data: JobProgressEvent = JSON.parse(event.data);
+          if (data && data.stage) {
+            if (runId && data.run_id && data.run_id !== runId) return;
+            if (data.stage === 'completed' || data.stage === 'failed' || data.stage === 'cancelled') {
+              handleTerminalState(data);
+            } else {
+              setJobProgress(data);
+            }
+          }
+        } catch (e) {
+          console.debug('SSE parse issue:', e);
+        }
+      };
+
+      eventSource.addEventListener('progress', onProgress);
+      eventSource.onmessage = onProgress;
+      eventSource.onerror = () => {
+        // SSE error or reconnecting; interval polling will ensure progress updates continue
+      };
+    } catch (e) {
+      console.warn('EventSource connection error:', e);
+    }
+
+    return () => {
+      isMounted = false;
+      clearInterval(pollInterval);
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
+  }, [isProcessing, metadata?.job_id, currentRunId]);
+
+  // Clean up timers on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-      if (eventSourceRef.current) eventSourceRef.current.close();
     };
   }, []);
 
@@ -431,7 +553,7 @@ export const App: React.FC = () => {
       }
 
       // Check if in editor view
-      if (!videoSrc || outputUrl || isProcessing) {
+      if (!videoSrc || viewMode === 'inspect' || isProcessing) {
         return;
       }
 
@@ -511,7 +633,7 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [videoSrc, outputUrl, isProcessing, isShortcutsOpen, currentFrame, keyframeStrokes, handleUndo, handleRedo]);
+  }, [videoSrc, viewMode, isProcessing, isShortcutsOpen, currentFrame, keyframeStrokes, handleUndo, handleRedo]);
 
   const handleCancelJob = async () => {
     if (!metadata || !currentRunId) return;
@@ -563,108 +685,7 @@ export const App: React.FC = () => {
       }
 
       const resData: MaskJobResponse = await res.json();
-      const runId = resData.run_id;
-      setCurrentRunId(runId);
-
-      if (eventSourceRef.current) eventSourceRef.current.close();
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-
-      const eventSource = new EventSource(`/api/v1/jobs/${metadata.job_id}/events?run_id=${runId}`);
-      eventSourceRef.current = eventSource;
-
-      const handleEventData = (rawData: string) => {
-        try {
-          const data: JobProgressEvent = JSON.parse(rawData);
-          if (data && data.stage) {
-            if (data.run_id && data.run_id !== runId) return;
-            setJobProgress(data);
-            if (data.stage === 'completed') {
-              if (eventSourceRef.current) {
-                eventSourceRef.current.close();
-                eventSourceRef.current = null;
-              }
-              if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-              }
-              setIsProcessing(false);
-              setIsCancelling(false);
-              if (data.output_url) {
-                setOutputUrl(data.output_url);
-              }
-              setLatestRunId(runId);
-              setCurrentRunId(null);
-            } else if (data.stage === 'failed' || data.stage === 'cancelled') {
-              if (eventSourceRef.current) {
-                eventSourceRef.current.close();
-                eventSourceRef.current = null;
-              }
-              if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-                pollIntervalRef.current = null;
-              }
-              setIsProcessing(false);
-              setIsCancelling(false);
-              setCurrentRunId(null);
-            }
-          }
-        } catch (e) {
-          console.error('SSE parse error:', e);
-        }
-      };
-
-      eventSource.addEventListener('progress', (e: MessageEvent) => {
-        handleEventData(e.data);
-      });
-      eventSource.onmessage = (event) => {
-        handleEventData(event.data);
-      };
-
-      // Poll fallback
-      const pollInterval = window.setInterval(async () => {
-        try {
-          const pollRes = await fetch(`/api/v1/jobs/${metadata.job_id}/status?run_id=${runId}`);
-          if (pollRes.ok) {
-            const statusData: JobProgressEvent = await pollRes.json();
-            if (statusData && statusData.stage) {
-              if (statusData.run_id && statusData.run_id !== runId) return;
-              setJobProgress(statusData);
-              if (statusData.stage === 'completed') {
-                if (pollIntervalRef.current) {
-                  clearInterval(pollIntervalRef.current);
-                  pollIntervalRef.current = null;
-                }
-                if (eventSourceRef.current) {
-                  eventSourceRef.current.close();
-                  eventSourceRef.current = null;
-                }
-                setIsProcessing(false);
-                setIsCancelling(false);
-                if (statusData.output_url) {
-                  setOutputUrl(statusData.output_url);
-                }
-                setLatestRunId(runId);
-                setCurrentRunId(null);
-              } else if (statusData.stage === 'failed' || statusData.stage === 'cancelled') {
-                if (pollIntervalRef.current) {
-                  clearInterval(pollIntervalRef.current);
-                  pollIntervalRef.current = null;
-                }
-                if (eventSourceRef.current) {
-                  eventSourceRef.current.close();
-                  eventSourceRef.current = null;
-                }
-                setIsProcessing(false);
-                setIsCancelling(false);
-                setCurrentRunId(null);
-              }
-            }
-          }
-        } catch (err) {
-          console.warn('Status poll failed:', err);
-        }
-      }, 1000);
-      pollIntervalRef.current = pollInterval;
+      setCurrentRunId(resData.run_id);
     } catch (err: unknown) {
       console.error(err);
       setIsProcessing(false);
@@ -680,14 +701,6 @@ export const App: React.FC = () => {
   };
 
   const handleReset = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
     setVideoFile(null);
     setVideoSrc(null);
     setMetadata(null);
@@ -696,6 +709,7 @@ export const App: React.FC = () => {
     setCurrentKeyframePreviews({});
     setMaskBase64(null);
     setOutputUrl(null);
+    setViewMode('annotate');
     setAccumulateMode(false);
     setJobProgress(null);
     setIsProcessing(false);
@@ -705,7 +719,7 @@ export const App: React.FC = () => {
   };
 
   const handleAddAnotherSubject = (frameToSeek: number) => {
-    setOutputUrl(null);
+    setViewMode('annotate');
     setAccumulateMode(true);
     setKeyframeStrokes({});
     setStrokeHistory({});
@@ -741,7 +755,7 @@ export const App: React.FC = () => {
           </div>
 
           {/* Undo / Redo in top bar */}
-          {videoSrc && !outputUrl && (
+          {videoSrc && viewMode === 'annotate' && (
             <div className="flex items-center gap-0.5 ml-2 pl-3 border-l border-neutral-800 flex-shrink-0">
               <button
                 type="button"
@@ -769,21 +783,23 @@ export const App: React.FC = () => {
         <div className="hidden md:flex items-center bg-neutral-900 border border-neutral-800 rounded-lg p-0.5 text-xs font-medium flex-shrink-0">
           <button
             type="button"
-            onClick={() => setOutputUrl(null)}
+            onClick={() => setViewMode('annotate')}
             className={`px-3 py-1 rounded-md transition ${
-              !outputUrl ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+              viewMode === 'annotate' ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
             }`}
           >
             Annotate
           </button>
           <button
             type="button"
-            onClick={() => {
-              if (latestRunId && outputUrl) setOutputUrl(outputUrl);
-            }}
+            onClick={() => setViewMode('inspect')}
             disabled={!outputUrl}
             className={`px-3 py-1 rounded-md transition ${
-              outputUrl ? 'bg-neutral-800 text-white shadow-sm' : 'text-neutral-600 cursor-not-allowed'
+              viewMode === 'inspect'
+                ? 'bg-neutral-800 text-white shadow-sm'
+                : outputUrl
+                ? 'text-neutral-400 hover:text-neutral-200'
+                : 'text-neutral-600 cursor-not-allowed'
             }`}
           >
             Inspect Masks
@@ -792,7 +808,7 @@ export const App: React.FC = () => {
 
         {/* Right: Peek, Shortcuts, Action Button */}
         <div className="flex items-center gap-2 flex-shrink-0">
-          {videoSrc && !outputUrl && (
+          {videoSrc && viewMode === 'annotate' && (
             <button
               type="button"
               onClick={() => setIsPeekHidden((prev) => !prev)}
@@ -818,7 +834,7 @@ export const App: React.FC = () => {
           </button>
 
           {/* Primary Action Button (VEED Signature Lime) */}
-          {videoSrc && !outputUrl && (
+          {videoSrc && viewMode === 'annotate' && (
             <button
               type="button"
               onClick={handleStartMaskJob}
@@ -1235,7 +1251,7 @@ export const App: React.FC = () => {
           {videoSrc && (
             <div className="flex-1 flex flex-col min-h-0 w-full overflow-hidden p-2 sm:p-3 gap-2">
               {/* Output Player View */}
-              {outputUrl && metadata ? (
+              {viewMode === 'inspect' && outputUrl && metadata ? (
                 <div className="flex-1 w-full h-full min-h-0 overflow-hidden">
                   <MaskPreviewPlayer
                     jobId={metadata.job_id}
@@ -1362,6 +1378,10 @@ export const App: React.FC = () => {
                   annotatedFrameIdx={currentFrame}
                   onCancel={handleCancelJob}
                   isCancelling={isCancelling}
+                  onViewMasks={() => {
+                    setIsProcessing(false);
+                    setViewMode('inspect');
+                  }}
                 />
               </div>
             </div>

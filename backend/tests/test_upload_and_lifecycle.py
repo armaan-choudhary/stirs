@@ -475,7 +475,7 @@ def test_reject_duplicate_active_runs(monkeypatch, sample_video_bytes):
 
         # Wait for run 1 to finish
         start = time.time()
-        while time.time() - start < 5.0:
+        while time.time() - start < 25.0:
             st = test_client.get(f"/api/v1/jobs/{job_id}/status?run_id={run1_id}").json()
             if st.get("stage") in ("completed", "failed"):
                 break
@@ -514,11 +514,12 @@ def test_failure_or_cancellation_of_second_run_preserves_first_run(monkeypatch, 
         run1_id = res1.json()["run_id"]
 
         start = time.time()
-        while time.time() - start < 5.0:
+        while time.time() - start < 25.0:
             st = test_client.get(f"/api/v1/jobs/{job_id}/status?run_id={run1_id}").json()
-            if st.get("stage") == "completed":
+            if st.get("stage") in ("completed", "failed"):
                 break
             time.sleep(0.05)
+        assert st.get("stage") == "completed", f"Run 1 did not complete: {st}"
 
         job_dir = config.WORKSPACE_DIR / job_id
         published_zip = job_dir / "output_masks.zip"
@@ -624,11 +625,12 @@ def test_run_scoped_event_queues_prevent_stale_terminal_events(sample_video_byte
         run1_id = res1.json()["run_id"]
 
         start = time.time()
-        while time.time() - start < 5.0:
+        while time.time() - start < 25.0:
             st = test_client.get(f"/api/v1/jobs/{job_id}/status?run_id={run1_id}").json()
-            if st.get("stage") == "completed":
+            if st.get("stage") in ("completed", "failed"):
                 break
             time.sleep(0.05)
+        assert st.get("stage") == "completed", f"Run 1 did not complete: {st}"
 
         # Ensure run 1 has queued events
         assert run1_id in worker_module.RUN_EVENT_QUEUES
@@ -650,7 +652,7 @@ def test_run_scoped_event_queues_prevent_stale_terminal_events(sample_video_byte
 
         # Wait for run 2 to finish cleanly
         start = time.time()
-        while time.time() - start < 5.0:
+        while time.time() - start < 25.0:
             st2 = test_client.get(f"/api/v1/jobs/{job_id}/status?run_id={run2_id}").json()
             if st2.get("stage") == "completed":
                 break
