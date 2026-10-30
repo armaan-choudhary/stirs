@@ -41,23 +41,49 @@ WORKSPACE_CLEANUP_INTERVAL_SECONDS = float(os.environ.get("WORKSPACE_CLEANUP_INT
 ENABLE_AUTO_WORKSPACE_CLEANUP = os.environ.get("ENABLE_AUTO_WORKSPACE_CLEANUP", "true").lower() in ("true", "1", "yes")
 
 
-# Available model variants
+# Available model variants (SAM 2 Large is primary; SAM 2 Small is fallback)
 SAM2_VARIANTS = {
-    "small": {
-        "config": "configs/sam2.1/sam2.1_hiera_s.yaml",
-        "checkpoint": str(SAM2_CHECKPOINTS_DIR / "sam2.1_hiera_small.pt"),
-    },
     "large": {
         "config": "configs/sam2.1/sam2.1_hiera_l.yaml",
         "checkpoint": str(SAM2_CHECKPOINTS_DIR / "sam2.1_hiera_large.pt"),
+    },
+    "small": {
+        "config": "configs/sam2.1/sam2.1_hiera_s.yaml",
+        "checkpoint": str(SAM2_CHECKPOINTS_DIR / "sam2.1_hiera_small.pt"),
     }
 }
 
-# Auto-select small if present for lightning fast inference, otherwise fallback to large
-if (SAM2_CHECKPOINTS_DIR / "sam2.1_hiera_small.pt").exists():
-    ACTIVE_VARIANT = "small"
-else:
-    ACTIVE_VARIANT = "large"
+
+def determine_active_variant() -> str:
+    """
+    Selects SAM 2 Large as the primary model.
+    If the large checkpoint is not available on disk, falls back to SAM 2 Small.
+    Can also be overridden via the SAM2_VARIANT environment variable.
+    """
+    env_variant = os.environ.get("SAM2_VARIANT", "").lower()
+    if env_variant in SAM2_VARIANTS:
+        target_ckpt = Path(SAM2_VARIANTS[env_variant]["checkpoint"])
+        if target_ckpt.exists():
+            return env_variant
+
+    large_ckpt = SAM2_CHECKPOINTS_DIR / "sam2.1_hiera_large.pt"
+    small_ckpt = SAM2_CHECKPOINTS_DIR / "sam2.1_hiera_small.pt"
+
+    # Primary: large if checkpoint is present
+    if large_ckpt.exists():
+        return "large"
+    # Fallback: small if checkpoint is present
+    elif small_ckpt.exists():
+        return "small"
+    # Default to large for setup/downloader targets
+    return "large"
+
+
+ACTIVE_VARIANT = determine_active_variant()
 
 DEFAULT_SAM2_CONFIG = SAM2_VARIANTS[ACTIVE_VARIANT]["config"]
 DEFAULT_SAM2_CHECKPOINT = SAM2_VARIANTS[ACTIVE_VARIANT]["checkpoint"]
+
+# Fallback variant paths for runtime degradation (e.g. CUDA OOM or missing large checkpoint)
+FALLBACK_SAM2_CONFIG = SAM2_VARIANTS["small"]["config"]
+FALLBACK_SAM2_CHECKPOINT = SAM2_VARIANTS["small"]["checkpoint"]

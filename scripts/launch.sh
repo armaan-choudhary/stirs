@@ -366,21 +366,24 @@ check_and_prompt_dependencies() {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Model Weights Verification & Download Setup
+# 3. Model Weights Verification & Download Setup (Large Primary, Small Fallback)
 # ------------------------------------------------------------------------------
 setup_model_weights() {
-  local sam2_small="${CHECKPOINTS_DIR}/sam2.1_hiera_small.pt"
   local sam2_large="${CHECKPOINTS_DIR}/sam2.1_hiera_large.pt"
+  local sam2_small="${CHECKPOINTS_DIR}/sam2.1_hiera_small.pt"
 
   mkdir -p "${CHECKPOINTS_DIR}"
 
-  if [[ -s "${sam2_small}" ]]; then
-    log_success "SAM 2.1 Small model checkpoint found at ${sam2_small}"
-  elif [[ -s "${sam2_large}" ]]; then
-    log_success "SAM 2.1 Large model checkpoint found at ${sam2_large}"
+  if [[ -s "${sam2_large}" ]]; then
+    log_success "SAM 2.1 Large model checkpoint found (Primary): ${sam2_large}"
+    if [[ -s "${sam2_small}" ]]; then
+      log_success "SAM 2.1 Small model checkpoint found (Fallback): ${sam2_small}"
+    fi
+  elif [[ -s "${sam2_small}" ]]; then
+    log_warn "SAM 2.1 Large checkpoint not found. Operating with SAM 2.1 Small: ${sam2_small}"
   else
-    log_info "SAM 2 model checkpoint not found in directory."
-    log_info "Invoking automated weights setup to download sam2.1_hiera_small.pt..."
+    log_info "SAM 2 model checkpoints not found in directory."
+    log_info "Invoking automated weights setup to download primary SAM 2.1 Large model..."
     if [[ -f "${PROJECT_DIR}/scripts/setup_weights.sh" ]]; then
       bash "${PROJECT_DIR}/scripts/setup_weights.sh"
     else

@@ -200,11 +200,13 @@ def run_sync_pipeline(
                 "objects": obj_prompts
             })
 
-        # Step 2: SAM 2 bidirectional propagation (via cached singleton)
+        # Step 2: SAM 2 bidirectional propagation (via cached singleton with small fallback)
         sam2_generator = SAM2MaskGenerator.get_instance(
             config_path=config.DEFAULT_SAM2_CONFIG,
             checkpoint_path=config.DEFAULT_SAM2_CHECKPOINT,
-            device=config.DEVICE
+            device=config.DEVICE,
+            fallback_config_path=config.FALLBACK_SAM2_CONFIG,
+            fallback_checkpoint_path=config.FALLBACK_SAM2_CHECKPOINT,
         )
 
         def sam_progress(stage: str, pct: int):

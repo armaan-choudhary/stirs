@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # stirs - SAM 2 Model Weights Setup
-# Automated checkpoint downloader with multi-tool support (curl / wget),
-# progress tracking, safe temporary staging, and atomic placement.
+# Automated checkpoint downloader with SAM 2 Large as primary model
+# and graceful fallback to SAM 2 Small if large is not feasible.
 # ==============================================================================
 set -Eeuo pipefail
 
@@ -13,11 +13,11 @@ WORKSPACE_DIR="${BASE_DIR}/workspace"
 
 mkdir -p "${SAM2_DIR}" "${WORKSPACE_DIR}"
 
-SAM2_SMALL="${SAM2_DIR}/sam2.1_hiera_small.pt"
 SAM2_LARGE="${SAM2_DIR}/sam2.1_hiera_large.pt"
+SAM2_SMALL="${SAM2_DIR}/sam2.1_hiera_small.pt"
 
-SMALL_URL="https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt"
 LARGE_URL="https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt"
+SMALL_URL="https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt"
 
 echo "=== stirs: SAM 2 Model Weights Setup ==="
 echo "Checkpoints root: ${SAM2_DIR}"
@@ -64,20 +64,39 @@ download_checkpoint() {
   return 0
 }
 
-# 1. SAM 2.1 Small Checkpoint (Fast default, optimized for 4GB-8GB GPUs and CPU)
-if [[ -s "${SAM2_SMALL}" ]]; then
-  echo "[✓] SAM 2.1 Small checkpoint verified: ${SAM2_SMALL}"
+# 1. Primary: SAM 2.1 Large Checkpoint
+large_ok=false
+if [[ -s "${SAM2_LARGE}" ]]; then
+  echo "[✓] SAM 2.1 Large checkpoint verified (Primary): ${SAM2_LARGE}"
+  large_ok=true
 else
-  echo "[!] SAM 2.1 Small checkpoint not found in ${SAM2_DIR}."
-  download_checkpoint "${SMALL_URL}" "${SAM2_SMALL}" "sam2.1_hiera_small.pt (~176MB)"
+  echo "[!] SAM 2.1 Large checkpoint not found. Attempting download..."
+  if download_checkpoint "${LARGE_URL}" "${SAM2_LARGE}" "SAM 2.1 Large (Primary, ~857MB)"; then
+    large_ok=true
+  else
+    echo "[!] Downloading SAM 2.1 Large was not feasible (network/disk error)."
+    echo "[!] Falling back to SAM 2.1 Small..."
+  fi
 fi
 
-# 2. SAM 2.1 Large Checkpoint (Optional high-tier)
-if [[ -s "${SAM2_LARGE}" ]]; then
-  echo "[✓] SAM 2.1 Large checkpoint verified: ${SAM2_LARGE}"
-elif [[ "${1:-}" == "--large" || "${1:-}" == "--all" ]]; then
-  echo "[!] Downloading optional SAM 2.1 Large checkpoint..."
-  download_checkpoint "${LARGE_URL}" "${SAM2_LARGE}" "sam2.1_hiera_large.pt (~857MB)"
+# 2. Fallback: SAM 2.1 Small Checkpoint
+# If Large failed or is missing, Small is essential. Even if Large succeeded,
+# ensure Small is present or download it if requested for runtime OOM safety.
+if [[ "$large_ok" = false ]]; then
+  if [[ -s "${SAM2_SMALL}" ]]; then
+    echo "[✓] SAM 2.1 Small checkpoint verified (Fallback): ${SAM2_SMALL}"
+  else
+    echo "[!] Downloading SAM 2.1 Small checkpoint..."
+    download_checkpoint "${SMALL_URL}" "${SAM2_SMALL}" "SAM 2.1 Small (~176MB)"
+  fi
+else
+  # Large is ready; verify if small is also present for dynamic runtime fallback
+  if [[ -s "${SAM2_SMALL}" ]]; then
+    echo "[✓] SAM 2.1 Small checkpoint verified (Fallback): ${SAM2_SMALL}"
+  elif [[ "${1:-}" == "--with-small" || "${1:-}" == "--all" ]]; then
+    echo "[!] Downloading SAM 2.1 Small checkpoint for runtime fallback safety..."
+    download_checkpoint "${SMALL_URL}" "${SAM2_SMALL}" "SAM 2.1 Small (~176MB)" || true
+  fi
 fi
 
 echo "=== Model setup complete ==="

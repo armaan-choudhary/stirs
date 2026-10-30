@@ -1,6 +1,6 @@
 # stirs - Video Mask Generator (SAM 2)
 
-An interactive, high-performance video mask generation system powered by **Meta SAM 2** (`sam2.1_hiera_small` / `sam2.1_hiera_large`), a **FastAPI** backend, and a **React 18 + TypeScript + Vite** frontend.
+An interactive, high-performance video mask generation system powered by **Meta SAM 2** with **SAM 2 Large** (`sam2.1_hiera_large`) as the primary model and automatic fallback to **SAM 2 Small** (`sam2.1_hiera_small`), a **FastAPI** backend, and a **React 18 + TypeScript + Vite** frontend.
 
 Draw lasso loops around target subjects or secondary elements (e.g. cast shadows, water/floor reflections) on keyframes, and SAM 2 propagates the masks bidirectionally across the video. The final deliverable is `output_masks.zip` containing numbered 8-bit single-channel binary PNG masks (`00000.png`, `00001.png`, ...) adhering to the project output contract.
 
@@ -193,7 +193,7 @@ stirs/
 ```
 This script provides complete one-command setup across all major Linux distributions (Ubuntu/Debian, Arch/Manjaro, Fedora/RHEL, openSUSE, Alpine, Void, etc.) and macOS:
 1. **Multi-Distro Dependency Check**: Detects the Linux distribution and package manager (`pacman`, `apt`, `dnf`, `zypper`, `apk`, `xbps`, `brew`), verifies required system tools (`python3`, `python3-venv`, `node >= 18`, `npm`, `ffmpeg`, `curl`), and interactively prompts the user to install any missing packages automatically.
-2. **Model Weights Setup**: Automatically checks for SAM 2 weights and downloads the default checkpoint (`sam2.1_hiera_small.pt` from Meta CDN) with retry and integrity checks if not already present.
+2. **Model Weights Setup**: Automatically checks for SAM 2 weights and downloads the primary checkpoint (`sam2.1_hiera_large.pt`, with fallback to `sam2.1_hiera_small.pt` from Meta CDN) with retry and integrity checks if not already present.
 3. **Environment & Dependencies**: Sets up the Python virtual environment (`.venv`), installs backend requirements (`backend/requirements.txt`), and installs frontend npm packages.
 4. **Service Orchestration**: Starts both the FastAPI backend (`http://localhost:8000`) and Vite frontend (`http://localhost:3000`) with clean signal trapping and shutdown handling.
 

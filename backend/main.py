@@ -346,11 +346,13 @@ async def preview_mask(req: PreviewMaskRequest):
     else:
         combined_box = None
 
-    # Run SAM 2 preview inference (via cached singleton)
+    # Run SAM 2 preview inference (via cached singleton with small fallback)
     sam2_generator = SAM2MaskGenerator.get_instance(
         config_path=config.DEFAULT_SAM2_CONFIG,
         checkpoint_path=config.DEFAULT_SAM2_CHECKPOINT,
-        device=config.DEVICE
+        device=config.DEVICE,
+        fallback_config_path=config.FALLBACK_SAM2_CONFIG,
+        fallback_checkpoint_path=config.FALLBACK_SAM2_CHECKPOINT,
     )
 
     frames_dir = job_dir / "frames"

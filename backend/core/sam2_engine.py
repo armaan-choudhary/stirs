@@ -1,8 +1,11 @@
 import os
 import gc
 import cv2
+import logging
 import numpy as np
 from typing import Callable, Optional
+
+logger = logging.getLogger("stirs.sam2_engine")
 
 
 class JobCancelledException(Exception):
@@ -34,42 +37,163 @@ class SAM2MaskGenerator:
     _instance: Optional["SAM2MaskGenerator"] = None
 
     @classmethod
-    def get_instance(cls, config_path: str, checkpoint_path: str, device: str = "cuda") -> "SAM2MaskGenerator":
+    def get_instance(
+        cls,
+        config_path: str,
+        checkpoint_path: str,
+        device: str = "cuda",
+        fallback_config_path: Optional[str] = None,
+        fallback_checkpoint_path: Optional[str] = None,
+    ) -> "SAM2MaskGenerator":
         """Singleton accessor to prevent reloading the model from disk on every preview/job request."""
         if cls._instance is None:
-            cls._instance = cls(config_path, checkpoint_path, device)
+            cls._instance = cls(
+                config_path=config_path,
+                checkpoint_path=checkpoint_path,
+                device=device,
+                fallback_config_path=fallback_config_path,
+                fallback_checkpoint_path=fallback_checkpoint_path,
+            )
         elif cls._instance.checkpoint_path != checkpoint_path or cls._instance.config_path != config_path:
             cls._instance.unload_model()
-            cls._instance = cls(config_path, checkpoint_path, device)
+            cls._instance = cls(
+                config_path=config_path,
+                checkpoint_path=checkpoint_path,
+                device=device,
+                fallback_config_path=fallback_config_path,
+                fallback_checkpoint_path=fallback_checkpoint_path,
+            )
+        else:
+            if fallback_config_path is not None:
+                cls._instance.fallback_config_path = fallback_config_path
+            if fallback_checkpoint_path is not None:
+                cls._instance.fallback_checkpoint_path = fallback_checkpoint_path
         return cls._instance
 
-    def __init__(self, config_path: str, checkpoint_path: str, device: str = "cuda"):
+    def __init__(
+        self,
+        config_path: str,
+        checkpoint_path: str,
+        device: str = "cuda",
+        fallback_config_path: Optional[str] = None,
+        fallback_checkpoint_path: Optional[str] = None,
+    ):
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
+        self.fallback_config_path = fallback_config_path
+        self.fallback_checkpoint_path = fallback_checkpoint_path
         self.device = device if (TORCH_AVAILABLE and torch.cuda.is_available()) else "cpu"
         self.predictor = None
         self.image_predictor = None
         self._is_real_sam2 = SAM2_AVAILABLE and os.path.exists(checkpoint_path)
+        self.variant = "large" if "large" in checkpoint_path else "small"
         self.amp_dtype = (
             torch.bfloat16 if (TORCH_AVAILABLE and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
             else (torch.float16 if TORCH_AVAILABLE else None)
         )
 
+    def _try_fallback_to_small(self, reason: str) -> bool:
+        """
+        Attempts to fall back from SAM 2 Large to SAM 2 Small when large is not feasible
+        (e.g. CUDA OutOfMemory, insufficient VRAM, or corrupted/missing large checkpoint).
+        """
+        if self.variant != "large":
+            return False
+
+        fallback_ckpt = self.fallback_checkpoint_path
+        fallback_cfg = self.fallback_config_path
+
+        # If fallback checkpoint path wasn't provided, check default small path
+        if not fallback_ckpt:
+            ckpt_dir = os.path.dirname(self.checkpoint_path)
+            candidate = os.path.join(ckpt_dir, "sam2.1_hiera_small.pt")
+            if os.path.exists(candidate):
+                fallback_ckpt = candidate
+                fallback_cfg = "configs/sam2.1/sam2.1_hiera_s.yaml"
+
+        if not fallback_ckpt or not os.path.exists(fallback_ckpt):
+            logger.warning(
+                f"SAM 2 Large is not feasible ({reason}), but fallback checkpoint is not available."
+            )
+            return False
+
+        logger.warning(
+            f"SAM 2 Large is not feasible ({reason}). "
+            f"Gracefully falling back to SAM 2 Small ({fallback_ckpt})..."
+        )
+
+        self.unload_model()
+        self.config_path = fallback_cfg or "configs/sam2.1/sam2.1_hiera_s.yaml"
+        self.checkpoint_path = fallback_ckpt
+        self.variant = "small"
+        self._is_real_sam2 = SAM2_AVAILABLE and os.path.exists(fallback_ckpt)
+        return True
+
     def load_model(self):
         """Loads video predictor onto GPU with vos_optimized=True for high-speed tracking."""
-        if self._is_real_sam2 and self.predictor is None:
-            self.predictor = build_sam2_video_predictor(
-                self.config_path,
-                self.checkpoint_path,
-                device=self.device,
-                vos_optimized=True
-            )
+        if not self._is_real_sam2:
+            return
+
+        # Pre-emptive check: if free VRAM is critically low (< 1.2 GB), avoid OOM crash by falling back
+        if self.variant == "large" and self.device == "cuda" and TORCH_AVAILABLE:
+            try:
+                free_mem, _ = torch.cuda.mem_get_info()
+                if free_mem < 1.2 * (1024 ** 3):
+                    self._try_fallback_to_small("insufficient free VRAM (< 1.2 GB available)")
+            except Exception:
+                pass
+
+        if self.predictor is None:
+            try:
+                self.predictor = build_sam2_video_predictor(
+                    self.config_path,
+                    self.checkpoint_path,
+                    device=self.device,
+                    vos_optimized=True
+                )
+            except Exception as e:
+                err_str = str(e).lower()
+                is_oom = "out of memory" in err_str or (
+                    TORCH_AVAILABLE and isinstance(e, getattr(torch.cuda, "OutOfMemoryError", ()))
+                )
+                if self.variant == "large" and self._try_fallback_to_small(f"loading error: {e}"):
+                    self.predictor = build_sam2_video_predictor(
+                        self.config_path,
+                        self.checkpoint_path,
+                        device=self.device,
+                        vos_optimized=True
+                    )
+                else:
+                    raise
 
     def load_image_predictor(self):
         """Loads single-image predictor for interactive instant preview."""
-        if self._is_real_sam2 and self.image_predictor is None:
-            base_model = build_sam2(self.config_path, self.checkpoint_path, device=self.device)
-            self.image_predictor = SAM2ImagePredictor(base_model)
+        if not self._is_real_sam2:
+            return
+
+        # Pre-emptive check: if free VRAM is critically low (< 1.0 GB), avoid OOM crash by falling back
+        if self.variant == "large" and self.device == "cuda" and TORCH_AVAILABLE:
+            try:
+                free_mem, _ = torch.cuda.mem_get_info()
+                if free_mem < 1.0 * (1024 ** 3):
+                    self._try_fallback_to_small("insufficient free VRAM (< 1.0 GB available)")
+            except Exception:
+                pass
+
+        if self.image_predictor is None:
+            try:
+                base_model = build_sam2(self.config_path, self.checkpoint_path, device=self.device)
+                self.image_predictor = SAM2ImagePredictor(base_model)
+            except Exception as e:
+                err_str = str(e).lower()
+                is_oom = "out of memory" in err_str or (
+                    TORCH_AVAILABLE and isinstance(e, getattr(torch.cuda, "OutOfMemoryError", ()))
+                )
+                if self.variant == "large" and self._try_fallback_to_small(f"loading error: {e}"):
+                    base_model = build_sam2(self.config_path, self.checkpoint_path, device=self.device)
+                    self.image_predictor = SAM2ImagePredictor(base_model)
+                else:
+                    raise
 
     def unload_model(self):
         """Releases model memory and clears PyTorch CUDA cache."""
@@ -238,7 +362,21 @@ class SAM2MaskGenerator:
                         combined_mask_bool = np.logical_or(combined_mask_bool, masks[0] > 0.0)
 
                     return self.dilate_mask(combined_mask_bool, dilation_px)
-            except Exception:
+            except Exception as e:
+                err_str = str(e).lower()
+                is_oom = "out of memory" in err_str or (
+                    TORCH_AVAILABLE and isinstance(e, getattr(torch.cuda, "OutOfMemoryError", ()))
+                )
+                if self.variant == "large" and self._try_fallback_to_small(f"preview exception: {e}"):
+                    return self.preview_single_frame(
+                        frames_dir=frames_dir,
+                        frame_idx=frame_idx,
+                        box=box,
+                        points=points,
+                        labels=labels,
+                        multi_objects=multi_objects,
+                        dilation_px=dilation_px
+                    )
                 import traceback
                 traceback.print_exc()
                 for b, p, l in prompts:
@@ -349,59 +487,84 @@ class SAM2MaskGenerator:
         min_keyframe = max(0, min(min(all_frame_indices), total_frames - 1))
 
         if self._is_real_sam2 and TORCH_AVAILABLE:
-            autocast_ctx = (
-                torch.autocast("cuda", dtype=self.amp_dtype)
-                if (self.device == "cuda" and self.amp_dtype is not None)
-                else torch.inference_mode()
-            )
-            with torch.inference_mode(), autocast_ctx:
-                self.load_model()
-                state = self.predictor.init_state(
-                    video_path=frames_dir,
-                    offload_video_to_cpu=True,
-                    offload_state_to_cpu=True,
-                    async_loading_frames=True
+            try:
+                autocast_ctx = (
+                    torch.autocast("cuda", dtype=self.amp_dtype)
+                    if (self.device == "cuda" and self.amp_dtype is not None)
+                    else torch.inference_mode()
                 )
+                with torch.inference_mode(), autocast_ctx:
+                    self.load_model()
+                    state = self.predictor.init_state(
+                        video_path=frames_dir,
+                        offload_video_to_cpu=True,
+                        offload_state_to_cpu=True,
+                        async_loading_frames=True
+                    )
 
-                # Add all keyframe prompts into SAM 2 state
-                for kp in keyframe_prompts:
-                    f_idx = kp["frame_idx"]
-                    for (obj_id, b, pts, lbls) in kp["objects"]:
-                        self.predictor.add_new_points_or_box(
-                            inference_state=state,
-                            frame_idx=f_idx,
-                            obj_id=obj_id,
-                            box=b,
-                            points=pts,
-                            labels=lbls
-                        )
+                    # Add all keyframe prompts into SAM 2 state
+                    for kp in keyframe_prompts:
+                        f_idx = kp["frame_idx"]
+                        for (obj_id, b, pts, lbls) in kp["objects"]:
+                            self.predictor.add_new_points_or_box(
+                                inference_state=state,
+                                frame_idx=f_idx,
+                                obj_id=obj_id,
+                                box=b,
+                                points=pts,
+                                labels=lbls
+                            )
 
-                # Forward pass: from earliest keyframe -> End
-                for out_idx, obj_ids, logits in self.predictor.propagate_in_video(state, start_frame_idx=min_keyframe):
-                    if cancel_check and cancel_check():
-                        self.predictor.reset_state(state)
-                        raise JobCancelledException("Job was cancelled during forward propagation.")
-                    # logits shape: [num_objs, 1, H, W]
-                    # Union masks across all tracked objects (subject + reflection/shadow)
-                    mask_union = (logits > 0.0).any(dim=0).cpu().numpy().squeeze()
-                    segments[out_idx] = mask_union
-                    if progress_cb:
-                        progress_cb("sam2_forward", int((len(segments) / total_frames) * 50))
-
-                # Backward pass: earliest keyframe -> 0 (if earliest keyframe > 0)
-                if min_keyframe > 0:
-                    for out_idx, obj_ids, logits in self.predictor.propagate_in_video(
-                        state, start_frame_idx=min_keyframe, reverse=True
-                    ):
+                    # Forward pass: from earliest keyframe -> End
+                    for out_idx, obj_ids, logits in self.predictor.propagate_in_video(state, start_frame_idx=min_keyframe):
                         if cancel_check and cancel_check():
                             self.predictor.reset_state(state)
-                            raise JobCancelledException("Job was cancelled during backward propagation.")
+                            raise JobCancelledException("Job was cancelled during forward propagation.")
+                        # logits shape: [num_objs, 1, H, W]
+                        # Union masks across all tracked objects (subject + reflection/shadow)
                         mask_union = (logits > 0.0).any(dim=0).cpu().numpy().squeeze()
                         segments[out_idx] = mask_union
                         if progress_cb:
-                            progress_cb("sam2_backward", 50 + int((len(segments) / total_frames) * 50))
+                            progress_cb("sam2_forward", int((len(segments) / total_frames) * 50))
 
-                self.predictor.reset_state(state)
+                    # Backward pass: earliest keyframe -> 0 (if earliest keyframe > 0)
+                    if min_keyframe > 0:
+                        for out_idx, obj_ids, logits in self.predictor.propagate_in_video(
+                            state, start_frame_idx=min_keyframe, reverse=True
+                        ):
+                            if cancel_check and cancel_check():
+                                self.predictor.reset_state(state)
+                                raise JobCancelledException("Job was cancelled during backward propagation.")
+                            mask_union = (logits > 0.0).any(dim=0).cpu().numpy().squeeze()
+                            segments[out_idx] = mask_union
+                            if progress_cb:
+                                progress_cb("sam2_backward", 50 + int((len(segments) / total_frames) * 50))
+
+                    self.predictor.reset_state(state)
+            except JobCancelledException:
+                raise
+            except Exception as e:
+                err_str = str(e).lower()
+                is_oom = "out of memory" in err_str or (
+                    TORCH_AVAILABLE and isinstance(e, getattr(torch.cuda, "OutOfMemoryError", ()))
+                )
+                if self.variant == "large" and self._try_fallback_to_small(f"propagation failed with {e}"):
+                    # Retry full video propagation with small model
+                    return self.propagate_full_video(
+                        frames_dir=frames_dir,
+                        output_mask_dir=output_mask_dir,
+                        annotated_frame_idx=annotated_frame_idx,
+                        box=box,
+                        points=points,
+                        labels=labels,
+                        keyframe_prompts=keyframe_prompts,
+                        dilation_px=dilation_px,
+                        accumulate=accumulate,
+                        progress_cb=progress_cb,
+                        cancel_check=cancel_check,
+                        existing_mask_dir=existing_mask_dir
+                    )
+                raise
         else:
             # Deterministic geometric approximation fallback for testing and environments
             # without model checkpoints or GPU.
