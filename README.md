@@ -191,7 +191,11 @@ stirs/
 ```bash
 ./scripts/launch.sh
 ```
-This script configures the Python virtual environment, installs dependencies, checks weights, and boots both the FastAPI backend (`http://localhost:8000`) and Vite frontend (`http://localhost:3000`).
+This script provides complete one-command setup across all major Linux distributions (Ubuntu/Debian, Arch/Manjaro, Fedora/RHEL, openSUSE, Alpine, Void, etc.) and macOS:
+1. **Multi-Distro Dependency Check**: Detects the Linux distribution and package manager (`pacman`, `apt`, `dnf`, `zypper`, `apk`, `xbps`, `brew`), verifies required system tools (`python3`, `python3-venv`, `node >= 18`, `npm`, `ffmpeg`, `curl`), and interactively prompts the user to install any missing packages automatically.
+2. **Model Weights Setup**: Automatically checks for SAM 2 weights and downloads the default checkpoint (`sam2.1_hiera_small.pt` from Meta CDN) with retry and integrity checks if not already present.
+3. **Environment & Dependencies**: Sets up the Python virtual environment (`.venv`), installs backend requirements (`backend/requirements.txt`), and installs frontend npm packages.
+4. **Service Orchestration**: Starts both the FastAPI backend (`http://localhost:8000`) and Vite frontend (`http://localhost:3000`) with clean signal trapping and shutdown handling.
 
 ### Manual Setup
 
