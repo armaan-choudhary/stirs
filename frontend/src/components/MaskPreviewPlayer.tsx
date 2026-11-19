@@ -15,6 +15,8 @@ import {
   Maximize2,
   Split,
   Gauge,
+  Sparkles,
+  Loader2,
 } from 'lucide-react';
 import { getActiveRenderRect } from '../utils/coordinateMap';
 
@@ -29,6 +31,10 @@ interface MaskPreviewPlayerProps {
   videoHeight: number;
   onReset: () => void;
   onAddAnotherSubject?: (currentFrame: number) => void;
+  onStartRemoval?: () => void;
+  isRemovalActive?: boolean;
+  isRemovalCompleted?: boolean;
+  onViewCleanedVideo?: () => void;
 }
 
 type PreviewViewMode = 'overlay' | 'split' | 'wipe' | 'mask-only';
@@ -44,6 +50,10 @@ export const MaskPreviewPlayer: React.FC<MaskPreviewPlayerProps> = ({
   videoHeight,
   onReset,
   onAddAnotherSubject,
+  onStartRemoval,
+  isRemovalActive = false,
+  isRemovalCompleted = false,
+  onViewCleanedVideo,
 }) => {
   const [currentFrame, setCurrentFrame] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -330,7 +340,52 @@ export const MaskPreviewPlayer: React.FC<MaskPreviewPlayerProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
+          {onStartRemoval && (
+            <button
+              type="button"
+              onClick={onStartRemoval}
+              disabled={isRemovalActive}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold transition active:scale-95 shadow-md ${
+                isRemovalActive
+                  ? 'bg-neutral-800 text-neutral-400 border border-neutral-700 cursor-not-allowed'
+                  : isRemovalCompleted
+                  ? 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700'
+                  : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white shadow-violet-900/30'
+              }`}
+              title="Remove object using EffectErase diffusion pipeline"
+            >
+              {isRemovalActive ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-400" />
+                  <span>Removing...</span>
+                </>
+              ) : isRemovalCompleted ? (
+                <>
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Re-run Removal</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5 fill-current" />
+                  <span>Remove Object</span>
+                </>
+              )}
+            </button>
+          )}
+
+          {isRemovalCompleted && onViewCleanedVideo && (
+            <button
+              type="button"
+              onClick={onViewCleanedVideo}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition active:scale-95 shadow-md shadow-violet-900/30"
+              title="View the completed cleaned video"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>Cleaned Video</span>
+            </button>
+          )}
+
           {onAddAnotherSubject && (
             <button
               type="button"
@@ -363,6 +418,43 @@ export const MaskPreviewPlayer: React.FC<MaskPreviewPlayerProps> = ({
           </button>
         </div>
       </div>
+
+      {/* EffectErase Quick Action Banner */}
+      {onStartRemoval && !isRemovalCompleted && (
+        <div className="bg-gradient-to-r from-violet-950/40 via-neutral-900 to-indigo-950/30 border border-violet-800/40 rounded-2xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md flex-shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-violet-500/10 border border-violet-500/30 flex items-center justify-center text-violet-400 flex-shrink-0">
+              <Sparkles className="w-4 h-4 fill-violet-400/20" />
+            </div>
+            <div>
+              <span className="text-xs font-semibold text-neutral-100 block">
+                Ready for AI Object Removal
+              </span>
+              <span className="text-[11px] text-neutral-400 block">
+                Use EffectErase diffusion inpainting to erase the selected object and shadows from this video.
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onStartRemoval}
+            disabled={isRemovalActive}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition active:scale-95 shadow-md flex-shrink-0 disabled:opacity-50"
+          >
+            {isRemovalActive ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Processing Removal...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-3.5 h-3.5 fill-current" />
+                <span>Remove Object Now</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
 
       {/* Main Preview Container */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 items-start">

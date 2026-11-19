@@ -15,7 +15,7 @@ import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from sse_starlette.sse import EventSourceResponse
 
 import config
@@ -32,6 +32,11 @@ from schemas import (
     JobProgressEvent,
     WorkspaceCleanupRequest,
     WorkspaceCleanupResponse,
+    RemovalJobRequest,
+    RemovalJobResponse,
+    RemovalStatusResponse,
+    RemovalProgressEvent,
+    RemovalCancelResponse,
 )
 from core.geometry import (
     convert_strokes_to_sam2_prompts,
@@ -49,6 +54,16 @@ from tasks.worker import (
     ACTIVE_RUNS,
     cancel_job,
     is_job_active
+)
+from tasks.removal_worker import (
+    start_removal_task,
+    get_removal_queue,
+    get_removal_status,
+    cancel_removal,
+    is_removal_active,
+    REMOVAL_RUN_STATUS,
+    JOB_LATEST_REMOVAL_RUN,
+    ACTIVE_REMOVAL_RUNS,
 )
 
 logger = logging.getLogger("stirs.workspace")
@@ -96,7 +111,7 @@ def cleanup_old_workspaces(max_age_hours: Optional[int] = None) -> int:
 
             job_id = resolved_item.name
             # Active job safety check: never delete active running jobs
-            if is_job_active(job_id):
+            if is_job_active(job_id) or is_removal_active(job_id):
                 continue
 
             # Check modification time
@@ -531,3 +546,185 @@ async def stream_job_events(job_id: str, run_id: Optional[str] = Query(default=N
                 }
 
     return EventSourceResponse(event_generator())
+
+
+# =====================================================================
+# Video Removal Endpoints (EffectErase)
+# =====================================================================
+
+@app.get("/api/v1/jobs/{job_id}/removal/preflight")
+@app.get("/api/v1/removal/preflight")
+async def check_removal_preflight(job_id: Optional[str] = None):
+    """
+    Checks whether the EffectErase runtime, scripts, weights, and device are available.
+    Returns status and actionable guidance.
+    """
+    try:
+        from tasks.removal_worker import _get_adapter_classes
+        adapter_cls, _, _ = _get_adapter_classes()
+        adapter = adapter_cls()
+        if hasattr(adapter, "check_availability"):
+            available, reason = adapter.check_availability()
+            return {"available": available, "reason": reason}
+    except Exception as e:
+        return {"available": False, "reason": str(e)}
+    return {"available": False, "reason": "EffectErase adapter is not configured."}
+
+
+@app.post("/api/v1/jobs/{job_id}/removal", response_model=RemovalJobResponse)
+async def trigger_removal_job(
+    job_id: str,
+    req: Optional[RemovalJobRequest] = Body(default=None)
+):
+    """
+    Enqueues an EffectErase video removal task for job_id.
+    Requires completed mask set and raw video.
+    Returns job_id, erase_run_id, and status: queued.
+    Rejects duplicate active removal requests for the same job with 409 Conflict.
+    """
+    erase_run_id = await start_removal_task(job_id, request=req)
+    return RemovalJobResponse(job_id=job_id, erase_run_id=erase_run_id, status="queued")
+
+
+@app.get("/api/v1/jobs/{job_id}/removal/{erase_run_id}/status", response_model=RemovalStatusResponse)
+async def get_removal_job_status(job_id: str, erase_run_id: str):
+    """
+    Returns run-scoped status, stage, progress, and output metadata for a removal run.
+    """
+    status_payload = get_removal_status(job_id, erase_run_id=erase_run_id)
+    if status_payload is None:
+        raise HTTPException(status_code=404, detail="Removal run not found")
+    return RemovalStatusResponse(**status_payload)
+
+
+@app.get("/api/v1/jobs/{job_id}/removal/{erase_run_id}/events")
+async def stream_removal_events(job_id: str, erase_run_id: str):
+    """
+    Server-Sent Events (SSE) stream scoped to erase_run_id for real-time removal progress:
+    {"job_id": "...", "erase_run_id": "...", "stage": "...", "progress": 0-100, ...}
+    """
+    job_dir = (config.WORKSPACE_DIR / job_id).resolve()
+    workspace_root = config.WORKSPACE_DIR.resolve()
+    if workspace_root not in job_dir.parents:
+        raise HTTPException(status_code=400, detail="Invalid job path")
+
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job workspace not found")
+
+    queue = get_removal_queue(job_id, erase_run_id=erase_run_id)
+
+    async def event_generator():
+        while True:
+            try:
+                event_data = await asyncio.wait_for(queue.get(), timeout=20.0)
+                yield {
+                    "event": "progress",
+                    "data": json.dumps(event_data)
+                }
+                if event_data.get("stage") in ("completed", "failed", "cancelled"):
+                    break
+            except asyncio.TimeoutError:
+                yield {
+                    "event": "ping",
+                    "data": json.dumps({"type": "keepalive"})
+                }
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/v1/jobs/{job_id}/removal/{erase_run_id}/cancel", response_model=RemovalCancelResponse)
+async def cancel_removal_job(job_id: str, erase_run_id: str):
+    """
+    Cooperatively cancels an ongoing removal run or marks a queued removal run as cancelled.
+    """
+    job_dir = (config.WORKSPACE_DIR / job_id).resolve()
+    workspace_root = config.WORKSPACE_DIR.resolve()
+    if workspace_root not in job_dir.parents:
+        raise HTTPException(status_code=400, detail="Invalid job path")
+
+    if not job_dir.exists() and erase_run_id not in REMOVAL_RUN_STATUS:
+        raise HTTPException(status_code=404, detail="Job workspace not found")
+
+    current_status = REMOVAL_RUN_STATUS.get(erase_run_id, {})
+    current_stage = current_status.get("stage")
+
+    if current_stage in ("completed", "failed", "cancelled"):
+        return RemovalCancelResponse(
+            job_id=job_id,
+            erase_run_id=erase_run_id,
+            status=current_stage,
+            message=f"Removal run is already in terminal state: {current_stage}"
+        )
+
+    # Signal cooperative cancellation
+    was_active = cancel_removal(job_id, erase_run_id=erase_run_id)
+
+    if not was_active and current_stage in ("queued", "pending", None):
+        queue = get_removal_queue(job_id, erase_run_id=erase_run_id)
+        payload = {
+            "job_id": job_id,
+            "erase_run_id": erase_run_id,
+            "stage": "cancelled",
+            "status": "cancelled",
+            "progress": 0,
+            "error": "Removal was cancelled before execution."
+        }
+        REMOVAL_RUN_STATUS[erase_run_id] = payload
+        await queue.put(payload)
+        return RemovalCancelResponse(
+            job_id=job_id,
+            erase_run_id=erase_run_id,
+            status="cancelled",
+            message="Removal run cancelled before execution."
+        )
+
+    return RemovalCancelResponse(
+        job_id=job_id,
+        erase_run_id=erase_run_id,
+        status="cancelling",
+        message="Cancellation requested."
+    )
+
+
+@app.get("/api/v1/jobs/{job_id}/removal/{erase_run_id}/result")
+async def get_removal_result(job_id: str, erase_run_id: str):
+    """
+    Streams / downloads the published cleaned video for this removal run.
+    Uses versioned erase_run_id with cache-control headers preventing stale browser caching.
+    Guards paths against directory traversal.
+    """
+    job_dir = (config.WORKSPACE_DIR / job_id).resolve()
+    workspace_root = config.WORKSPACE_DIR.resolve()
+    if workspace_root not in job_dir.parents:
+        raise HTTPException(status_code=400, detail="Invalid job path")
+
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job workspace not found")
+
+    target_run_id = erase_run_id
+    if target_run_id == "latest":
+        latest = JOB_LATEST_REMOVAL_RUN.get(job_id)
+        if latest:
+            target_run_id = latest
+
+    result_path = job_dir / f"cleaned_{target_run_id}.mp4"
+    if not result_path.exists():
+        # Fallback to stable cleaned.mp4
+        stable_path = job_dir / "cleaned.mp4"
+        if stable_path.exists():
+            result_path = stable_path
+
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Cleaned video not found for this removal run")
+
+    return FileResponse(
+        path=str(result_path),
+        media_type="video/mp4",
+        filename=f"cleaned_{job_id[:8]}_{target_run_id[:8]}.mp4",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
+    )
+

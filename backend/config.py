@@ -6,10 +6,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 CHECKPOINTS_DIR = BASE_DIR / "checkpoints"
 SAM2_CHECKPOINTS_DIR = CHECKPOINTS_DIR / "sam2"
+EFFECT_ERASE_CHECKPOINTS_DIR = Path(os.environ.get("EFFECT_ERASE_CHECKPOINTS_DIR", str(CHECKPOINTS_DIR / "effect_erase")))
+EFFECT_ERASE_REPO_DIR = Path(os.environ.get("EFFECT_ERASE_REPO_DIR", str(BASE_DIR / "external" / "EffectErase")))
+EFFECT_ERASE_PYTHON = os.environ.get("EFFECT_ERASE_PYTHON", "")
 
 # Ensure directories exist
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 SAM2_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+EFFECT_ERASE_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Device Configuration
 DEVICE = "cpu"
@@ -25,6 +29,10 @@ try:
         AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 except ImportError:
     pass
+
+# EffectErase runtime configuration
+EFFECT_ERASE_DEVICE = os.environ.get("EFFECT_ERASE_DEVICE", DEVICE)
+EFFECT_ERASE_TIMEOUT_SECONDS = float(os.environ.get("EFFECT_ERASE_TIMEOUT_SECONDS", 1800.0))
 
 # Engine defaults
 DEFAULT_DILATION_PX = 7

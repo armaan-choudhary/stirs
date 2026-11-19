@@ -26,6 +26,9 @@ import { TimelineControls } from './components/TimelineControls';
 import { LiveProgressTracker } from './components/LiveProgressTracker';
 import { MaskPreviewPlayer } from './components/MaskPreviewPlayer';
 import { ShortcutsModal } from './components/ShortcutsModal';
+import { RemovalControls } from './components/RemovalControls';
+import { RemovalProgressTracker } from './components/RemovalProgressTracker';
+import { CleanedVideoPlayer } from './components/CleanedVideoPlayer';
 import {
   SAMPLE_VIDEOS,
   createSampleVideoFile,
@@ -39,6 +42,8 @@ import {
   JobProgressEvent,
   MaskJobRequest,
   MaskJobResponse,
+  RemovalProgressEvent,
+  RemovalJobResponse,
 } from './types/api';
 import {
   StrokeHistoryMap,
@@ -96,10 +101,10 @@ export const App: React.FC = () => {
     }
   }, [currentFrame, currentKeyframePreviews, keyframeStrokes]);
 
-  // View mode: 'annotate' (canvas editor) or 'inspect' (split/wipe mask viewer)
-  const [viewMode, setViewMode] = useState<'annotate' | 'inspect'>('annotate');
+  // View mode: 'annotate' (canvas editor), 'inspect' (split/wipe mask viewer), or 'cleaned' (EffectErase result)
+  const [viewMode, setViewMode] = useState<'annotate' | 'inspect' | 'cleaned'>('annotate');
 
-  // Processing & SSE state
+  // Mask Processing & SSE state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [accumulateMode, setAccumulateMode] = useState<boolean>(false);
   const [jobProgress, setJobProgress] = useState<JobProgressEvent | null>(null);
@@ -110,7 +115,18 @@ export const App: React.FC = () => {
   const [isCancelling, setIsCancelling] = useState<boolean>(false);
   const timerRef = useRef<number | null>(null);
 
-  // Check backend for existing mask output when video/metadata is loaded
+  // EffectErase Video Removal state
+  const [isRemovalProcessing, setIsRemovalProcessing] = useState<boolean>(false);
+  const [isRemovalCancelling, setIsRemovalCancelling] = useState<boolean>(false);
+  const [removalProgress, setRemovalProgress] = useState<RemovalProgressEvent | null>(null);
+  const [currentEraseRunId, setCurrentEraseRunId] = useState<string | null>(null);
+  const [latestEraseRunId, setLatestEraseRunId] = useState<string | null>(null);
+  const [cleanedVideoUrl, setCleanedVideoUrl] = useState<string | null>(null);
+  const [showRemovalTracker, setShowRemovalTracker] = useState<boolean>(false);
+  const [removalElapsedSeconds, setRemovalElapsedSeconds] = useState<number>(0);
+  const removalTimerRef = useRef<number | null>(null);
+
+  // Check backend for existing mask output and removal output when video/metadata is loaded
   useEffect(() => {
     if (!metadata?.job_id) return;
     let isMounted = true;
@@ -128,6 +144,23 @@ export const App: React.FC = () => {
         }
       } catch (err) {
         console.debug('No existing output masks for job:', err);
+      }
+
+      // Check for previously completed removal run
+      try {
+        const removalRes = await fetch(`/api/v1/jobs/${metadata.job_id}/removal/status`);
+        if (!removalRes.ok || !isMounted) return;
+        const remData: RemovalProgressEvent = await removalRes.json();
+        if (remData && remData.stage === 'completed' && isMounted) {
+          const resUrl =
+            remData.result_url ||
+            remData.output_url ||
+            `/api/v1/jobs/${metadata.job_id}/removal/${remData.erase_run_id}/result`;
+          setCleanedVideoUrl(resUrl);
+          setLatestEraseRunId(remData.erase_run_id);
+        }
+      } catch (err) {
+        console.debug('No existing removal output for job:', err);
       }
     };
 
@@ -233,10 +266,103 @@ export const App: React.FC = () => {
     };
   }, [isProcessing, metadata?.job_id, currentRunId]);
 
+  // EffectErase Removal job tracking via SSE with synchronized polling fallback
+  useEffect(() => {
+    if (!isRemovalProcessing || !metadata?.job_id || !currentEraseRunId) return;
+
+    let isMounted = true;
+    const eraseRunId = currentEraseRunId;
+    const statusUrl = `/api/v1/jobs/${metadata.job_id}/removal/${eraseRunId}/status`;
+    const eventsUrl = `/api/v1/jobs/${metadata.job_id}/removal/${eraseRunId}/events`;
+
+    const handleTerminalRemovalState = (data: RemovalProgressEvent) => {
+      setRemovalProgress(data);
+      if (data.stage === 'completed') {
+        setIsRemovalProcessing(false);
+        setIsRemovalCancelling(false);
+        const resultUrl =
+          data.result_url ||
+          data.output_url ||
+          `/api/v1/jobs/${metadata.job_id}/removal/${eraseRunId}/result`;
+        setCleanedVideoUrl(resultUrl);
+        setLatestEraseRunId(data.erase_run_id || eraseRunId);
+        setCurrentEraseRunId(null);
+        setViewMode('cleaned');
+      } else if (data.stage === 'failed' || data.stage === 'cancelled') {
+        setIsRemovalProcessing(false);
+        setIsRemovalCancelling(false);
+        setCurrentEraseRunId(null);
+      }
+    };
+
+    // Immediate poll check on mount / trigger
+    const fetchRemovalStatus = async () => {
+      try {
+        const res = await fetch(statusUrl);
+        if (!res.ok || !isMounted) return;
+        const data: RemovalProgressEvent = await res.json();
+        if (!isMounted) return;
+
+        if (data && data.stage) {
+          if (data.erase_run_id && data.erase_run_id !== eraseRunId) return;
+          if (data.stage === 'completed' || data.stage === 'failed' || data.stage === 'cancelled') {
+            handleTerminalRemovalState(data);
+          } else {
+            setRemovalProgress(data);
+          }
+        }
+      } catch (err) {
+        console.warn('Removal status poll error:', err);
+      }
+    };
+
+    fetchRemovalStatus();
+    const pollInterval = window.setInterval(fetchRemovalStatus, 1000);
+
+    // SSE connection
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource(eventsUrl);
+      const onProgress = (event: MessageEvent) => {
+        if (!isMounted) return;
+        try {
+          const data: RemovalProgressEvent = JSON.parse(event.data);
+          if (data && data.stage) {
+            if (data.erase_run_id && data.erase_run_id !== eraseRunId) return;
+            if (data.stage === 'completed' || data.stage === 'failed' || data.stage === 'cancelled') {
+              handleTerminalRemovalState(data);
+            } else {
+              setRemovalProgress(data);
+            }
+          }
+        } catch (e) {
+          console.debug('Removal SSE parse issue:', e);
+        }
+      };
+
+      eventSource.addEventListener('progress', onProgress);
+      eventSource.onmessage = onProgress;
+      eventSource.onerror = () => {
+        // SSE error or reconnecting; interval polling will ensure progress updates continue
+      };
+    } catch (e) {
+      console.warn('Removal EventSource connection error:', e);
+    }
+
+    return () => {
+      isMounted = false;
+      clearInterval(pollInterval);
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
+  }, [isRemovalProcessing, metadata?.job_id, currentEraseRunId]);
+
   // Clean up timers on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (removalTimerRef.current) clearInterval(removalTimerRef.current);
     };
   }, []);
 
@@ -258,6 +384,25 @@ export const App: React.FC = () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [isProcessing]);
+
+  // Live timer during EffectErase removal execution
+  useEffect(() => {
+    if (isRemovalProcessing) {
+      setRemovalElapsedSeconds(0);
+      const start = Date.now();
+      removalTimerRef.current = window.setInterval(() => {
+        setRemovalElapsedSeconds(Math.floor((Date.now() - start) / 1000));
+      }, 1000);
+    } else {
+      if (removalTimerRef.current) {
+        clearInterval(removalTimerRef.current);
+        removalTimerRef.current = null;
+      }
+    }
+    return () => {
+      if (removalTimerRef.current) clearInterval(removalTimerRef.current);
+    };
+  }, [isRemovalProcessing]);
 
   // Measure container dimensions for letterbox math
   useEffect(() => {
@@ -553,7 +698,7 @@ export const App: React.FC = () => {
       }
 
       // Check if in editor view
-      if (!videoSrc || viewMode === 'inspect' || isProcessing) {
+      if (!videoSrc || viewMode !== 'annotate' || isProcessing) {
         return;
       }
 
@@ -700,6 +845,74 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleStartRemoval = async () => {
+    if (!metadata?.job_id || !outputUrl || isRemovalProcessing) return;
+
+    setIsRemovalProcessing(true);
+    setIsRemovalCancelling(false);
+    setShowRemovalTracker(true);
+    setRemovalProgress({
+      job_id: metadata.job_id,
+      erase_run_id: '',
+      stage: 'queued',
+      progress: 0,
+      message: 'Queueing EffectErase video removal job...',
+    });
+
+    try {
+      const res = await fetch(`/api/v1/jobs/${metadata.job_id}/removal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: metadata.job_id }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || 'Failed to enqueue removal job');
+      }
+
+      const resData: RemovalJobResponse = await res.json();
+      setCurrentEraseRunId(resData.erase_run_id);
+      setLatestEraseRunId(resData.erase_run_id);
+      setRemovalProgress({
+        job_id: metadata.job_id,
+        erase_run_id: resData.erase_run_id,
+        stage: 'queued',
+        progress: 5,
+        message: 'Removal queued. Initializing adapter...',
+      });
+    } catch (err: unknown) {
+      console.error('Removal trigger error:', err);
+      setIsRemovalProcessing(false);
+      setIsRemovalCancelling(false);
+      setCurrentEraseRunId(null);
+      const msg = err instanceof Error ? err.message : 'Removal request failed';
+      setRemovalProgress({
+        job_id: metadata.job_id,
+        erase_run_id: '',
+        stage: 'failed',
+        progress: 0,
+        message: msg,
+        error: msg,
+      });
+    }
+  };
+
+  const handleCancelRemoval = async () => {
+    if (!metadata || !currentEraseRunId) return;
+    setIsRemovalCancelling(true);
+    try {
+      await fetch(
+        `/api/v1/jobs/${metadata.job_id}/removal/${currentEraseRunId}/cancel`,
+        {
+          method: 'POST',
+        }
+      );
+    } catch (err) {
+      console.error('Failed to cancel removal job:', err);
+    }
+  };
+
   const handleReset = () => {
     setVideoFile(null);
     setVideoSrc(null);
@@ -716,6 +929,14 @@ export const App: React.FC = () => {
     setIsCancelling(false);
     setCurrentRunId(null);
     setLatestRunId(null);
+    setCleanedVideoUrl(null);
+    setCurrentEraseRunId(null);
+    setLatestEraseRunId(null);
+    setRemovalProgress(null);
+    setIsRemovalProcessing(false);
+    setIsRemovalCancelling(false);
+    setShowRemovalTracker(false);
+    setRemovalElapsedSeconds(0);
   };
 
   const handleAddAnotherSubject = (frameToSeek: number) => {
@@ -804,6 +1025,22 @@ export const App: React.FC = () => {
           >
             Inspect Masks
           </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('cleaned')}
+            disabled={!cleanedVideoUrl}
+            className={`px-3 py-1 rounded-md transition flex items-center gap-1.5 ${
+              viewMode === 'cleaned'
+                ? 'bg-violet-600 text-white shadow-sm font-semibold'
+                : cleanedVideoUrl
+                ? 'text-violet-400 hover:text-violet-300'
+                : 'text-neutral-600 cursor-not-allowed'
+            }`}
+            title={cleanedVideoUrl ? 'View cleaned video output' : 'Removal not completed yet'}
+          >
+            <Sparkles className="w-3 h-3" />
+            <span>Cleaned Video</span>
+          </button>
         </div>
 
         {/* Right: Peek, Shortcuts, Action Button */}
@@ -832,6 +1069,22 @@ export const App: React.FC = () => {
           >
             <HelpCircle className="w-4 h-4" />
           </button>
+
+          {/* Removal Action Button in Header when masks exist */}
+          {outputUrl && (
+            <RemovalControls
+              jobId={metadata?.job_id || ''}
+              hasMasks={Boolean(outputUrl)}
+              isRemovalActive={isRemovalProcessing}
+              isRemovalCompleted={Boolean(cleanedVideoUrl)}
+              eraseRunId={latestEraseRunId}
+              currentStage={removalProgress?.stage}
+              removalProgress={removalProgress?.progress}
+              onStartRemoval={handleStartRemoval}
+              onViewCleanedVideo={() => setViewMode('cleaned')}
+              variant="compact"
+            />
+          )}
 
           {/* Primary Action Button (VEED Signature Lime) */}
           {videoSrc && viewMode === 'annotate' && (
@@ -1250,8 +1503,25 @@ export const App: React.FC = () => {
           {/* B. When video IS loaded: Results Player OR Editor Canvas filling 100% height */}
           {videoSrc && (
             <div className="flex-1 flex flex-col min-h-0 w-full overflow-hidden p-2 sm:p-3 gap-2">
-              {/* Output Player View */}
-              {viewMode === 'inspect' && outputUrl && metadata ? (
+              {/* Output Player View: Cleaned Video OR Inspect Masks */}
+              {viewMode === 'cleaned' && cleanedVideoUrl && metadata ? (
+                <div className="flex-1 w-full h-full min-h-0 overflow-hidden">
+                  <CleanedVideoPlayer
+                    jobId={metadata.job_id}
+                    eraseRunId={latestEraseRunId || 'latest'}
+                    videoSrc={videoSrc}
+                    cleanedVideoUrl={cleanedVideoUrl}
+                    totalFrames={metadata.frame_count}
+                    fps={metadata.fps}
+                    videoWidth={metadata.width}
+                    videoHeight={metadata.height}
+                    onViewMasks={() => setViewMode('inspect')}
+                    onAddAnotherSubject={handleAddAnotherSubject}
+                    onRerunRemoval={handleStartRemoval}
+                    onReset={handleReset}
+                  />
+                </div>
+              ) : viewMode === 'inspect' && outputUrl && metadata ? (
                 <div className="flex-1 w-full h-full min-h-0 overflow-hidden">
                   <MaskPreviewPlayer
                     jobId={metadata.job_id}
@@ -1264,6 +1534,10 @@ export const App: React.FC = () => {
                     videoHeight={metadata.height}
                     onReset={handleReset}
                     onAddAnotherSubject={handleAddAnotherSubject}
+                    onStartRemoval={handleStartRemoval}
+                    isRemovalActive={isRemovalProcessing}
+                    isRemovalCompleted={Boolean(cleanedVideoUrl)}
+                    onViewCleanedVideo={() => setViewMode('cleaned')}
                   />
                 </div>
               ) : (
@@ -1382,6 +1656,26 @@ export const App: React.FC = () => {
                     setIsProcessing(false);
                     setViewMode('inspect');
                   }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Floating In-Flight Removal Progress Tracker */}
+          {showRemovalTracker && removalProgress && (
+            <div className="fixed inset-x-0 bottom-4 z-50 max-w-2xl mx-auto px-4 animate-in slide-in-from-bottom-6 duration-200">
+              <div className="shadow-2xl">
+                <RemovalProgressTracker
+                  progress={removalProgress}
+                  elapsedSeconds={removalElapsedSeconds}
+                  onCancel={handleCancelRemoval}
+                  isCancelling={isRemovalCancelling}
+                  onRetry={handleStartRemoval}
+                  onViewResult={() => {
+                    setViewMode('cleaned');
+                    setShowRemovalTracker(false);
+                  }}
+                  onDismiss={() => setShowRemovalTracker(false)}
                 />
               </div>
             </div>

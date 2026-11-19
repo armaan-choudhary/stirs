@@ -70,3 +70,53 @@ class WorkspaceCleanupResponse(BaseModel):
     cleaned_count: int
     retention_hours: int
 
+
+# Video Removal Schemas (EffectErase)
+RemovalStage = Literal[
+    "queued",
+    "preparing_input",
+    "loading_model",
+    "inference",
+    "validating_output",
+    "publishing",
+    "completed",
+    "failed",
+    "cancelled",
+]
+
+class RemovalJobRequest(BaseModel):
+    prompt: Optional[str] = None
+
+class RemovalJobResponse(BaseModel):
+    job_id: str
+    erase_run_id: str
+    status: str
+
+class RemovalStatusResponse(BaseModel):
+    job_id: str
+    erase_run_id: str
+    status: str
+    stage: RemovalStage
+    progress: int = Field(..., ge=0, le=100)
+    output_url: Optional[str] = None
+    result_url: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+class RemovalProgressEvent(BaseModel):
+    job_id: str
+    erase_run_id: str
+    stage: RemovalStage
+    progress: int = Field(..., ge=0, le=100)
+    output_url: Optional[str] = None
+    result_url: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+class RemovalCancelResponse(BaseModel):
+    job_id: str
+    erase_run_id: str
+    status: str
+    message: Optional[str] = None
+
+

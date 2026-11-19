@@ -97,3 +97,38 @@ export interface ActiveRenderRect {
   height: number;
   scale: number;
 }
+
+// EffectErase Video Removal Types
+export type RemovalStage =
+  | 'queued'
+  | 'preparing_input'
+  | 'loading_model'
+  | 'inference'
+  | 'validating_output'
+  | 'publishing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface RemovalJobResponse {
+  job_id: string;
+  erase_run_id: string;
+  status: string;
+}
+
+export interface RemovalProgressEvent {
+  job_id: string;
+  erase_run_id: string;
+  stage: RemovalStage;
+  progress: number;
+  message?: string;
+  error?: string;
+  output_url?: string;
+  result_url?: string;
+}
+
+export interface RemovalCancelResponse {
+  status: string;
+  message?: string;
+}
+

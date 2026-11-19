@@ -1,6 +1,7 @@
 # Git Ignore for Circle-to-Select Video Object Removal
 # Virtual Environments
 .venv/
+.venv-effecterase/
 venv/
 ENV/
 env/
@@ -24,6 +25,7 @@ yarn-error.log*
 
 # Checkpoints and Heavy Weights (DO NOT COMMIT)
 checkpoints/
+external/EffectErase/
 *.pt
 *.pth
 *.bin
