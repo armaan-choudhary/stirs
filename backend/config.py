@@ -31,6 +31,8 @@ except ImportError:
     pass
 
 # EffectErase runtime configuration
+EFFECT_ERASE_BACKEND = os.environ.get("EFFECT_ERASE_BACKEND", "local").lower()
+EFFECT_ERASE_REMOTE_URL = os.environ.get("EFFECT_ERASE_REMOTE_URL", "")
 EFFECT_ERASE_DEVICE = os.environ.get("EFFECT_ERASE_DEVICE", DEVICE)
 EFFECT_ERASE_TIMEOUT_SECONDS = float(os.environ.get("EFFECT_ERASE_TIMEOUT_SECONDS", 1800.0))
 

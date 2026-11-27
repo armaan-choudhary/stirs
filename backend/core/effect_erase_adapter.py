@@ -83,12 +83,12 @@ class EffectEraseConfig:
     image_encoder_path: Path
     lora_path: Path
     device: str = "cuda"
-    num_inference_steps: int = 50
+    num_inference_steps: int = 25
     cfg: float = 1.0
     lora_alpha: float = 1.0
     seed: int = 2025
     tiled: bool = False
-    use_teacache: bool = False
+    use_teacache: bool = True
     height: int = 480
     width: int = 832
     num_frames: Optional[int] = None
@@ -207,12 +207,12 @@ class EffectEraseConfig:
             image_encoder_path=image_encoder,
             lora_path=lora,
             device=device,
-            num_inference_steps=int(os.environ.get("EFFECT_ERASE_STEPS", 50)),
+            num_inference_steps=int(os.environ.get("EFFECT_ERASE_STEPS", 25)),
             cfg=float(os.environ.get("EFFECT_ERASE_CFG", 1.0)),
             lora_alpha=float(os.environ.get("EFFECT_ERASE_LORA_ALPHA", 1.0)),
             seed=int(os.environ.get("EFFECT_ERASE_SEED", 2025)),
             tiled=os.environ.get("EFFECT_ERASE_TILED", "false").lower() in ("true", "1", "yes"),
-            use_teacache=os.environ.get("EFFECT_ERASE_USE_TEACACHE", "false").lower() in ("true", "1", "yes"),
+            use_teacache=os.environ.get("EFFECT_ERASE_USE_TEACACHE", "true").lower() in ("true", "1", "yes"),
             height=int(os.environ.get("EFFECT_ERASE_HEIGHT", 480)),
             width=int(os.environ.get("EFFECT_ERASE_WIDTH", 832)),
             num_frames=int(os.environ.get("EFFECT_ERASE_NUM_FRAMES")) if os.environ.get("EFFECT_ERASE_NUM_FRAMES") else None,
@@ -248,6 +248,21 @@ class EffectEraseAdapter:
             issues.append(
                 "ffprobe executable not found in system PATH. Install ffprobe to enable video metadata probing."
             )
+
+        backend_mode = (
+            getattr(config, "EFFECT_ERASE_BACKEND", None)
+            or os.environ.get("EFFECT_ERASE_BACKEND", "local")
+        ).lower()
+        if backend_mode in ("remote", "modal"):
+            remote_url = (
+                getattr(config, "EFFECT_ERASE_REMOTE_URL", None)
+                or os.environ.get("EFFECT_ERASE_REMOTE_URL", "")
+            ).strip()
+            if not remote_url:
+                issues.append(
+                    "EFFECT_ERASE_BACKEND=remote is set, but EFFECT_ERASE_REMOTE_URL is empty."
+                )
+            return (len(issues) == 0), ("\n".join(issues) if issues else None)
 
         # 2. Python binary
         py_bin = Path(self.config.python_bin)
@@ -604,6 +619,83 @@ class EffectEraseAdapter:
 
         return logs
 
+    def _execute_modal(
+        self,
+        modal_url: str,
+        source_video_path: Path,
+        mask_video_path: Path,
+        output_path: Path,
+        params: Dict[str, Any],
+        progress_cb: Optional[Callable[[str, int], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        import httpx
+
+        if cancel_check and cancel_check():
+            raise JobCancelledException("Removal job was cancelled before Modal request.")
+
+        if progress_cb:
+            progress_cb("inference", 30)
+
+        timeout_sec = float(
+            getattr(config, "EFFECT_ERASE_TIMEOUT_SECONDS", 1800.0)
+            if config is not None
+            else 1800.0
+        )
+
+        with (
+            open(source_video_path, "rb") as fg_f,
+            open(mask_video_path, "rb") as mask_f,
+        ):
+            files = {
+                "fg_bg_video": ("fg_bg.mp4", fg_f, "video/mp4"),
+                "mask_video": ("mask.mp4", mask_f, "video/mp4"),
+            }
+            base_url = modal_url.rstrip("/")
+            with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
+                resp = client.post(base_url, params=params, files=files)
+
+                if resp.status_code != 200:
+                    raise EffectEraseException(
+                        f"Remote EffectErase endpoint returned HTTP {resp.status_code}: {resp.text[:500]}"
+                    )
+
+                content_type = resp.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    import time
+
+                    job_id = resp.json().get("job_id")
+                    if not job_id:
+                        raise EffectEraseException(f"Remote endpoint returned unexpected JSON: {resp.text[:500]}")
+
+                    deadline = time.monotonic() + timeout_sec
+                    while time.monotonic() < deadline:
+                        if cancel_check and cancel_check():
+                            raise JobCancelledException("Removal job was cancelled during remote inference.")
+                        time.sleep(5)
+                        st = client.get(f"{base_url}/jobs/{job_id}")
+                        if st.status_code != 200:
+                            raise EffectEraseException(f"Remote status check failed ({st.status_code}): {st.text[:300]}")
+                        data = st.json()
+                        if data.get("status") == "done":
+                            res = client.get(f"{base_url}/jobs/{job_id}/result")
+                            if res.status_code != 200:
+                                raise EffectEraseException(f"Remote result download failed ({res.status_code})")
+                            output_path.write_bytes(res.content)
+                            break
+                        if data.get("status") == "failed":
+                            raise EffectEraseException(f"Remote EffectErase failed: {data.get('error', 'unknown error')}")
+                    else:
+                        raise EffectEraseException("Remote EffectErase timed out waiting for completion.")
+                else:
+                    output_path.write_bytes(resp.content)
+
+        if cancel_check and cancel_check():
+            raise JobCancelledException("Removal job was cancelled during remote inference.")
+
+        if progress_cb:
+            progress_cb("inference", 90)
+
     def run_removal(
         self,
         job_id: str,
@@ -711,6 +803,13 @@ class EffectEraseAdapter:
                     k = (frame_count - 1) // 4
                     num_frames = max(1, 4 * k + 1) if k >= 1 else frame_count
 
+            default_h = self.config.height
+            default_w = self.config.width
+            if raw_h > raw_w and default_w > default_h:
+                default_h, default_w = default_w, default_h
+            target_h = kwargs.get("height", default_h)
+            target_w = kwargs.get("width", default_w)
+
             cmd = [
                 str(self.config.python_bin),
                 str(self.config.script_path),
@@ -726,8 +825,8 @@ class EffectEraseAdapter:
                 "--cfg", str(kwargs.get("cfg", self.config.cfg)),
                 "--lora_alpha", str(kwargs.get("lora_alpha", self.config.lora_alpha)),
                 "--num_inference_steps", str(kwargs.get("num_inference_steps", self.config.num_inference_steps)),
-                "--height", str(kwargs.get("height", self.config.height)),
-                "--width", str(kwargs.get("width", self.config.width)),
+                "--height", str(target_h),
+                "--width", str(target_w),
                 "--num_frames", str(num_frames),
                 "--frame_interval", str(kwargs.get("frame_interval", self.config.frame_interval)),
             ]
@@ -737,11 +836,42 @@ class EffectEraseAdapter:
             if kwargs.get("use_teacache", self.config.use_teacache):
                 cmd.append("--use_teacache")
 
-            self._execute_subprocess(
-                cmd=cmd,
-                progress_cb=progress_cb,
-                cancel_check=cancel_check,
-            )
+            backend_mode = (
+                getattr(config, "EFFECT_ERASE_BACKEND", None)
+                or os.environ.get("EFFECT_ERASE_BACKEND", "local")
+            ).lower()
+
+            if backend_mode in ("remote", "modal"):
+                remote_url = (
+                    getattr(config, "EFFECT_ERASE_REMOTE_URL", None)
+                    or os.environ.get("EFFECT_ERASE_REMOTE_URL", "")
+                ).strip()
+                self._execute_modal(
+                    modal_url=remote_url,
+                    source_video_path=source_video_path,
+                    mask_video_path=mask_video_path,
+                    output_path=raw_output_path,
+                    params={
+                        "seed": kwargs.get("seed", self.config.seed),
+                        "cfg": kwargs.get("cfg", self.config.cfg),
+                        "lora_alpha": kwargs.get("lora_alpha", self.config.lora_alpha),
+                        "num_inference_steps": kwargs.get("num_inference_steps", self.config.num_inference_steps),
+                        "height": target_h,
+                        "width": target_w,
+                        "num_frames": num_frames,
+                        "frame_interval": kwargs.get("frame_interval", self.config.frame_interval),
+                        "tiled": True,
+                        "use_teacache": bool(kwargs.get("use_teacache", self.config.use_teacache)),
+                    },
+                    progress_cb=progress_cb,
+                    cancel_check=cancel_check,
+                )
+            else:
+                self._execute_subprocess(
+                    cmd=cmd,
+                    progress_cb=progress_cb,
+                    cancel_check=cancel_check,
+                )
 
             # Stage 4: Validate raw output
             if progress_cb:
