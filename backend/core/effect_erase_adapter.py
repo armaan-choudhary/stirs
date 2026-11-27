@@ -88,7 +88,7 @@ class EffectEraseConfig:
     lora_alpha: float = 1.0
     seed: int = 2025
     tiled: bool = False
-    use_teacache: bool = True
+    use_teacache: bool = False
     height: int = 480
     width: int = 832
     num_frames: Optional[int] = None
@@ -212,7 +212,7 @@ class EffectEraseConfig:
             lora_alpha=float(os.environ.get("EFFECT_ERASE_LORA_ALPHA", 1.0)),
             seed=int(os.environ.get("EFFECT_ERASE_SEED", 2025)),
             tiled=os.environ.get("EFFECT_ERASE_TILED", "false").lower() in ("true", "1", "yes"),
-            use_teacache=os.environ.get("EFFECT_ERASE_USE_TEACACHE", "true").lower() in ("true", "1", "yes"),
+            use_teacache=os.environ.get("EFFECT_ERASE_USE_TEACACHE", "false").lower() in ("true", "1", "yes"),
             height=int(os.environ.get("EFFECT_ERASE_HEIGHT", 480)),
             width=int(os.environ.get("EFFECT_ERASE_WIDTH", 832)),
             num_frames=int(os.environ.get("EFFECT_ERASE_NUM_FRAMES")) if os.environ.get("EFFECT_ERASE_NUM_FRAMES") else None,
