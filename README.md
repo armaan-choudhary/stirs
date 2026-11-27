@@ -156,6 +156,7 @@ The removal SSE stream emits events structured as:
 - Format: Single-channel 8-bit grayscale PNG (`0` = background, `255` = target mask).
 - Frame dimensions match the source video resolution.
 
+
 ### Cleaned Video Deliverables (Stage 2)
 - Cleaned Video File: `workspace/{job_id}/cleaned_{erase_run_id}.mp4`
 - Download route: `/api/v1/jobs/{job_id}/removal/{erase_run_id}/result`
@@ -241,4 +242,7 @@ Run frontend unit tests and production build verification:
 ```bash
 npm --prefix frontend test -- --run
 npm --prefix frontend run build
+
+
+
 ```
